@@ -60,7 +60,7 @@ docker run \
  --net=us-west2-net \
  -e MYSQL_ROOT_PASSWORD=$MYSQL_ROOT_PASSWORD \
  -p 3306:3306 \
- -v $PWD/mysql_files:/mysql_files:ro \
+ -v ./mysql_files:/mysql_files:ro \
  mysql:$MYSQL_VERSION
 
 echo
@@ -290,12 +290,123 @@ listen psql
 
 EOF
 
+echo 'Next step: Generate certificate authority (CA) certificate and private key for CockroachDB'
+pause
+
+mkdir certs_cockroachdb_ca my_safe_directory_cockroachdb
+
+docker run \
+ --rm \
+ --name temp_crdb \
+ -v ./certs_cockroachdb_ca:/certs_cockroachdb_ca \
+ -v ./my_safe_directory_cockroachdb:/my_safe_directory_cockroachdb \
+ cockroachdb/cockroach:$COCKROACHDB_VERSION \
+ cert create-ca \
+  --certs-dir=/certs_cockroachdb_ca \
+  --ca-key=/my_safe_directory_cockroachdb/ca.key
+
+echo
+ls -l certs_cockroachdb_ca my_safe_directory_cockroachdb
+
+echo
+echo 'Next step: Generate Cockroachdb node 1 certificate and private key'
+pause
+
+mkdir certs_cockroachdb_1
+cp -i certs_cockroachdb_ca/ca.crt certs_cockroachdb_1
+
+docker run \
+ --rm \
+ --name temp_crdb \
+ -v ./certs_cockroachdb_1:/certs_cockroachdb_1 \
+ -v ./my_safe_directory_cockroachdb:/my_safe_directory_cockroachdb \
+ cockroachdb/cockroach:$COCKROACHDB_VERSION \
+ cert create-node \
+  roach-seattle-1 \
+  --certs-dir=/certs_cockroachdb_1 \
+  --ca-key=/my_safe_directory_cockroachdb/ca.key 
+
+echo
+ls -l certs_cockroachdb_1 my_safe_directory_cockroachdb
+
+echo
+echo 'Next step: Generate Cockroachdb node 2 certificate and private key'
+pause
+
+mkdir certs_cockroachdb_2
+cp -i certs_cockroachdb_ca/ca.crt certs_cockroachdb_2
+
+docker run \
+ --rm \
+ --name temp_crdb \
+ -v ./certs_cockroachdb_2:/certs_cockroachdb_2 \
+ -v ./my_safe_directory_cockroachdb:/my_safe_directory_cockroachdb \
+ cockroachdb/cockroach:$COCKROACHDB_VERSION \
+ cert create-node \
+  roach-seattle-2 \
+  --certs-dir=/certs_cockroachdb_2 \
+  --ca-key=/my_safe_directory_cockroachdb/ca.key 
+
+echo
+ls -l certs_cockroachdb_2 my_safe_directory_cockroachdb
+
+echo
+echo 'Next step: Generate Cockroachdb node 3 certificate and private key'
+pause
+
+mkdir certs_cockroachdb_3
+cp -i certs_cockroachdb_ca/ca.crt certs_cockroachdb_3
+
+docker run \
+ --rm \
+ --name temp_crdb \
+ -v ./certs_cockroachdb_3:/certs_cockroachdb_3 \
+ -v ./my_safe_directory_cockroachdb:/my_safe_directory_cockroachdb \
+ cockroachdb/cockroach:$COCKROACHDB_VERSION \
+ cert create-node \
+  roach-seattle-3 \
+  --certs-dir=/certs_cockroachdb_3 \
+  --ca-key=/my_safe_directory_cockroachdb/ca.key 
+
+echo
+ls -l certs_cockroachdb_3 my_safe_directory_cockroachdb
+
+echo
+echo 'Next step: Generate root client certificate and private key'
+pause
+
+mkdir certs_cockroachdb_clients
+cp -i certs_cockroachdb_ca/ca.crt certs_cockroachdb_clients
+
+docker run \
+ --rm \
+ --name temp_crdb \
+ -v ./certs_cockroachdb_clients:/certs_cockroachdb_clients \
+ -v ./my_safe_directory_cockroachdb:/my_safe_directory_cockroachdb \
+ cockroachdb/cockroach:$COCKROACHDB_VERSION \
+ cert create-client \
+  root \
+  --certs-dir=/certs_cockroachdb_clients \
+  --ca-key=/my_safe_directory_cockroachdb/ca.key
+
+cp -i certs_cockroachdb_clients/client.root.crt certs_cockroachdb_1
+cp -i certs_cockroachdb_clients/client.root.key certs_cockroachdb_1
+cp -i certs_cockroachdb_clients/client.root.crt certs_cockroachdb_2
+cp -i certs_cockroachdb_clients/client.root.key certs_cockroachdb_2
+cp -i certs_cockroachdb_clients/client.root.crt certs_cockroachdb_3
+cp -i certs_cockroachdb_clients/client.root.key certs_cockroachdb_3
+
+echo
+ls -l certs_cockroachdb_clients certs_cockroachdb_1 certs_cockroachdb_2 certs_cockroachdb_3 my_safe_directory_cockroachdb
+
 echo
 echo 'Next step: Create the Docker containers for the 3 CockroachDB nodes'
 pause
 echo 'Creating the Docker container for CockroachDB 1 in Seattle'
 
 # Create the Docker containers for the 3 CockroachDB nodes
+
+mkdir roach-seattle-1-data
 
 docker run \
  -d \
@@ -308,19 +419,26 @@ docker run \
  --add-host=roach-seattle-3:172.27.0.13 \
  -p 26258:26257 \
  -p 8080:8080 \
- -v "roach-seattle-1-data:/cockroach/cockroach-data" \
- -v $PWD/CockroachDB_files:/CockroachDB_files:ro \
+ -v ./certs_cockroachdb_1:/cockroach/certs:ro \
+ -v ./roach-seattle-1-data:/cockroach/cockroach-data \
+ -v ./CockroachDB_files:/CockroachDB_files:ro \
  cockroachdb/cockroach:$COCKROACHDB_VERSION \
  start \
-  --insecure \
+  --certs-dir=certs \
   --store=cockroach-data,ballast-size=0 \
-  --join=roach-seattle-1 \
+  --advertise-addr=roach-seattle-1:26357 \
+  --listen-addr=roach-seattle-1:26357 \
+  --http-addr=roach-seattle-1:8080 \
+  --sql-addr=roach-seattle-1:26257 \
+  --join=roach-seattle-1:26357,roach-seattle-2:26357,roach-seattle-3:26357 \
   --locality=region=us-west2,zone=a
 
 echo
 echo 'Next step: Create the Docker container for CockroachDB 2 in Seattle'
 pause
 echo 'Creating the Docker container for CockroachDB 2 in Seattle'
+
+mkdir roach-seattle-2-data
 
 docker run \
  -d \
@@ -333,19 +451,26 @@ docker run \
  --add-host=roach-seattle-3:172.27.0.13 \
  -p 26259:26257 \
  -p 8081:8080 \
- -v "roach-seattle-2-data:/cockroach/cockroach-data" \
- -v $PWD/CockroachDB_files:/CockroachDB_files:ro \
+ -v ./certs_cockroachdb_2:/cockroach/certs \
+ -v ./roach-seattle-2-data:/cockroach/cockroach-data \
+ -v ./CockroachDB_files:/CockroachDB_files:ro \
  cockroachdb/cockroach:$COCKROACHDB_VERSION \
  start \
-  --insecure \
+  --certs-dir=certs \
   --store=cockroach-data,ballast-size=0 \
-  --join=roach-seattle-1 \
+  --advertise-addr=roach-seattle-2:26357 \
+  --listen-addr=roach-seattle-2:26357 \
+  --http-addr=roach-seattle-2:8080 \
+  --sql-addr=roach-seattle-2:26257 \
+  --join=roach-seattle-1:26357,roach-seattle-2:26357,roach-seattle-3:26357 \
   --locality=region=us-west2,zone=b
 
 echo
 echo 'Next step: Create the Docker container for CockroachDB 3 in Seattle'
 pause
 echo 'Creating the Docker container for CockroachDB 3 in Seattle'
+
+mkdir roach-seattle-3-data
 
 docker run \
  -d \
@@ -358,13 +483,18 @@ docker run \
  --add-host=roach-seattle-3:172.27.0.13 \
  -p 26260:26257 \
  -p 8082:8080 \
- -v "roach-seattle-3-data:/cockroach/cockroach-data" \
- -v $PWD/CockroachDB_files:/CockroachDB_files:ro \
+ -v ./certs_cockroachdb_3:/cockroach/certs \
+ -v ./roach-seattle-3-data:/cockroach/cockroach-data \
+ -v ./CockroachDB_files:/CockroachDB_files:ro \
  cockroachdb/cockroach:$COCKROACHDB_VERSION \
  start \
-  --insecure \
+  --certs-dir=certs \
   --store=cockroach-data,ballast-size=0 \
-  --join=roach-seattle-1 \
+  --advertise-addr=roach-seattle-3:26357 \
+  --listen-addr=roach-seattle-3:26357 \
+  --http-addr=roach-seattle-3:8080 \
+  --sql-addr=roach-seattle-3:26257 \
+  --join=roach-seattle-1:26357,roach-seattle-2:26357,roach-seattle-3:26357 \
   --locality=region=us-west2,zone=c
 
 echo
@@ -379,7 +509,7 @@ docker run \
  --ip=172.27.0.10 \
  -p 26257:26257 \
  --net=us-west2-net \
- -v $PWD/haproxy_data/us-west2/:/usr/local/etc/haproxy:ro \
+ -v ./haproxy_data/us-west2/:/usr/local/etc/haproxy:ro \
  haproxy:$HAPROXY_VERSION  
 
 echo
@@ -388,7 +518,7 @@ pause
 echo 'Initializing the CockroachDB cluster'
 
 # Initialize the CockroachDB cluster
-docker exec -it roach-seattle-1 ./cockroach init --insecure
+docker exec -it roach-seattle-1 ./cockroach --host=roach-seattle-1:26357 init --certs-dir=certs
 
 sleep 3
 
@@ -411,7 +541,7 @@ echo
 
 echo 'Initial databases:'
 
-docker exec roach-seattle-1 ./cockroach sql --insecure --format table -e 'SHOW DATABASES'
+docker exec roach-seattle-1 ./cockroach --host=roach-seattle-1:26257 sql --certs-dir=certs --format table -e 'SHOW DATABASES'
 
 echo
 echo 'Load DB schema on CockroachDB'
@@ -420,16 +550,18 @@ pause
 
 docker exec \
  roach-seattle-1 \
- ./cockroach sql \
-  --insecure \
+ ./cockroach \
+  --host=roach-seattle-1:26257 \
+  sql \
+  --certs-dir=certs \
   --file /CockroachDB_files/Chinook_CockroachDB_from_MySql_NO_DATA_NO_CONSTRAINTS_NO_INDEXES.sql
 
 echo
 echo 'After loading schema - databases and tables:'
 echo
-docker exec roach-seattle-1 ./cockroach sql --insecure --format table -e 'SHOW DATABASES'
+docker exec roach-seattle-1 ./cockroach --host=roach-seattle-1:26257 sql --certs-dir=certs --format table -e 'SHOW DATABASES'
 echo
-docker exec roach-seattle-1 ./cockroach sql --insecure --database chinook --format table -e 'SHOW TABLES'
+docker exec roach-seattle-1 ./cockroach --host=roach-seattle-1:26257 sql --certs-dir=certs --database chinook --format table -e 'SHOW TABLES'
 
 echo
 echo 'Prepare to perform the bulk data copy using MOLT Fetch...'
@@ -450,6 +582,7 @@ docker run \
  --hostname=molt_fetch_host \
  --ip=172.27.0.102 \
  --net=us-west2-net \
+ -v ./certs_cockroachdb_clients:/app/certs \
  cockroachdb/molt \
   fetch \
   --logging debug \
@@ -457,7 +590,7 @@ docker run \
   --direct-copy \
   --allow-tls-mode-disable \
   --source "mysql://root:$MYSQL_ROOT_PASSWORD@mysql_host:3306/Chinook" \
-  --target 'postgres://root@roach-seattle-1:26257/chinook?sslmode=disable' \
+  --target 'postgres://root@roach-seattle-1:26257/chinook?sslmode=verify-full&sslrootcert=certs%2Fca.crt&sslcert=certs%2Fclient.root.crt&sslkey=certs%2Fclient.root.key' \
 | tee molt_fetch_output.txt
 
 echo
@@ -473,9 +606,9 @@ echo
 echo 'Show CockroachDB table row counts after bulk copy'
 pause
 
-docker exec roach-seattle-1 ./cockroach sql --insecure --database chinook --format table -e 'SELECT count(*) AS album_count_cockroachdb FROM album'
+docker exec roach-seattle-1 ./cockroach --host=roach-seattle-1:26257 sql --certs-dir=certs --database chinook --format table -e 'SELECT count(*) AS album_count_cockroachdb FROM album'
 echo
-docker exec roach-seattle-1 ./cockroach sql --insecure --database chinook --format table -e 'SELECT count(*) AS artist_count_cockroachdb FROM artist'
+docker exec roach-seattle-1 ./cockroach --host=roach-seattle-1:26257 sql --certs-dir=certs --database chinook --format table -e 'SELECT count(*) AS artist_count_cockroachdb FROM artist'
 
 echo
 echo 'Use MOLT Verify to compare MySQL source data to CockroachDB target data'
@@ -487,12 +620,13 @@ docker run \
  --hostname=molt_verify_host \
  --ip=172.27.0.103 \
  --net=us-west2-net \
- cockroachdb/molt \
+ -v ./certs_cockroachdb_clients:/app/certs \
+cockroachdb/molt \
   verify \
   --table-filter '[^_].*' \
   --allow-tls-mode-disable \
   --source "mysql://root:$MYSQL_ROOT_PASSWORD@mysql_host:3306/Chinook" \
-  --target 'postgres://root@roach-seattle-1:26257/chinook?sslmode=disable' \
+  --target 'postgres://root@roach-seattle-1:26257/chinook?sslmode=verify-full&sslrootcert=certs%2Fca.crt&sslcert=certs%2Fclient.root.crt&sslkey=certs%2Fclient.root.key' \
 | tee molt_verify_output.txt
 
 echo
@@ -559,15 +693,16 @@ docker run \
  --hostname=molt_replicator_host \
  --ip=172.27.0.104 \
  --net=us-west2-net \
+ -v ./certs_cockroachdb_clients:/certs \
  cockroachdb/replicator \
   mylogical \
-  -v \
+  -vv \
   --defaultGTIDSet $CDC_CURSOR \
   --stagingSchema _replicator \
   --stagingCreateSchema \
   --targetSchema chinook.public \
   --sourceConn "mysql://root:$MYSQL_ROOT_PASSWORD@mysql_host:3306/Chinook?sslmode=disable" \
-  --targetConn 'postgres://root@roach-seattle-1:26257/chinook?sslmode=disable'
+  --targetConn 'postgres://root@roach-seattle-1:26257/chinook?sslmode=verify-full&sslrootcert=certs%2Fca.crt&sslcert=certs%2Fclient.root.crt&sslkey=certs%2Fclient.root.key'
 
 sleep 3
 
@@ -585,7 +720,7 @@ pause
 
 docker exec my-mysql-db mysql --password=$MYSQL_ROOT_PASSWORD --database=Chinook --table -e 'SELECT count(*) AS artist_count_mysql FROM Artist'
 echo
-docker exec roach-seattle-1 cockroach sql --insecure --database chinook --format table -e 'SELECT count(*) AS artist_count_cockroachdb FROM artist'
+docker exec roach-seattle-1 cockroach --host=roach-seattle-1:26257 sql --certs-dir=certs --database chinook --format table -e 'SELECT count(*) AS artist_count_cockroachdb FROM artist'
 
 echo
 echo "Insert $NUM_NEW_ARTISTS_MYSQL2 more artists in MySQL"
@@ -613,7 +748,7 @@ pause
 
 docker exec my-mysql-db mysql --password=$MYSQL_ROOT_PASSWORD --database=Chinook --table -e 'SELECT count(*) AS artist_count_mysql FROM Artist'
 echo
-docker exec roach-seattle-1 cockroach sql --insecure --database chinook --format table -e 'SELECT count(*) AS artist_count_cockroachdb FROM artist'
+docker exec roach-seattle-1 cockroach --host=roach-seattle-1:26257 sql --certs-dir=certs --database chinook --format table -e 'SELECT count(*) AS artist_count_cockroachdb FROM artist'
 
 echo
 echo 'Now use MOLT Verify again, just on the Artist table'
@@ -624,12 +759,13 @@ docker run \
  --hostname=molt_verify_host \
  --ip=172.27.0.103 \
  --net=us-west2-net \
+ -v ./certs_cockroachdb_clients:/app/certs \
  cockroachdb/molt \
   verify \
   --table-filter 'Artist' \
   --allow-tls-mode-disable \
   --source "mysql://root:$MYSQL_ROOT_PASSWORD@mysql_host:3306/Chinook" \
-  --target 'postgres://root@roach-seattle-1:26257/chinook?sslmode=disable' \
+  --target 'postgres://root@roach-seattle-1:26257/chinook?sslmode=verify-full&sslrootcert=certs%2Fca.crt&sslcert=certs%2Fclient.root.crt&sslkey=certs%2Fclient.root.key' \
 | tail -n +2 | jq
 
 echo
@@ -646,21 +782,21 @@ echo 'Next step: Generate certificate authority (CA) certificate and private key
 pause
 echo 'Generating certificate authority (CA) certificate and private key'
 
-mkdir certs
-mkdir my-safe-directory
+mkdir certs_replicator_reverse
+mkdir my_safe_directory_replicator_reverse
 
 docker run \
  --rm \
  --name temp_crdb \
- -v $PWD/certs:/certs \
- -v $PWD/my-safe-directory:/my-safe-directory \
+ -v ./certs_replicator_reverse:/certs_replicator_reverse \
+ -v ./my_safe_directory_replicator_reverse:/my_safe_directory_replicator_reverse \
  cockroachdb/cockroach:$COCKROACHDB_VERSION \
  cert create-ca \
-  --certs-dir=/certs \
-  --ca-key=/my-safe-directory/ca.key
+  --certs-dir=/certs_replicator_reverse \
+  --ca-key=/my_safe_directory_replicator_reverse/ca.key
 
 echo
-ls -l certs my-safe-directory
+ls -l certs_replicator_reverse my_safe_directory_replicator_reverse
 
 # Generate MOLT Replicator webhook TLS/endpoint certificate and private key
 echo
@@ -671,25 +807,25 @@ echo 'Generating MOLT Replicator webhook TLS/endpoint certificate and private ke
 docker run \
  --rm \
  --name temp_crdb \
- -v $PWD/certs:/certs \
- -v $PWD/my-safe-directory:/my-safe-directory \
+ -v ./certs_replicator_reverse:/certs_replicator_reverse \
+ -v ./my_safe_directory_replicator_reverse:/my_safe_directory_replicator_reverse \
  cockroachdb/cockroach:$COCKROACHDB_VERSION \
  cert create-node \
   molt_replicator_host \
-  --certs-dir=/certs \
-  --ca-key=/my-safe-directory/ca.key 
+  --certs-dir=/certs_replicator_reverse \
+  --ca-key=/my_safe_directory_replicator_reverse/ca.key 
 
 echo
-ls -l certs my-safe-directory
+ls -l certs_replicator_reverse my_safe_directory_replicator_reverse
 
 echo
 echo 'Now base64-encode and URL-encode the TLS/endpoint certificate and private key'
 echo 'and the CA certificate for use later in the CREATE CHANGEFEED statement.'
 pause
 
-NODE_CERT_BASE64_URL_ENCODED=$(base64 -i certs/node.crt | jq -R -r '@uri')
-NODE_KEY_BASE64_URL_ENCODED=$(base64 -i certs/node.key | jq -R -r '@uri')
-CA_CERT_BASE64_URL_ENCODED=$(base64 -i certs/ca.crt | jq -R -r '@uri')
+NODE_CERT_BASE64_URL_ENCODED=$(base64 -i certs_replicator_reverse/node.crt | jq -R -r '@uri')
+NODE_KEY_BASE64_URL_ENCODED=$(base64 -i certs_replicator_reverse/node.key | jq -R -r '@uri')
+CA_CERT_BASE64_URL_ENCODED=$(base64 -i certs_replicator_reverse/ca.crt | jq -R -r '@uri')
 
 echo
 echo 'TLS/endpoint certificate base64-encoded and URL-encoded:'
@@ -708,7 +844,7 @@ echo
 echo 'Enable rangefeeds for change data capture for reverse migration'
 pause
 
-docker exec roach-seattle-1 cockroach sql --insecure --database chinook --format table -e 'SET CLUSTER SETTING kv.rangefeed.enabled = true'
+docker exec roach-seattle-1 cockroach --host=roach-seattle-1:26257 sql --certs-dir=certs --database chinook --format table -e 'SET CLUSTER SETTING kv.rangefeed.enabled = true'
 
 echo
 echo '-- START DOWNTIME --'
@@ -748,7 +884,8 @@ docker run \
  --ip=172.27.0.104 \
  --net=us-west2-net \
  -p 30004:30004 \
- -v $PWD/certs:/certs \
+ -v ./certs_cockroachdb_clients:/certs_crdb \
+ -v ./certs_replicator_reverse:/certs_replicator_reverse \
  cockroachdb/replicator \
   start \
   -v \
@@ -757,9 +894,9 @@ docker run \
   --metricsAddr :30005 \
   --disableAuthentication \
   --targetConn "mysql://root:$MYSQL_ROOT_PASSWORD@mysql_host:3306/Chinook?sslmode=disable" \
-  --stagingConn 'postgres://root@roach-seattle-1:26257/chinook?sslmode=disable' \
-  --tlsCertificate /certs/node.crt \
-  --tlsPrivateKey /certs/node.key
+  --stagingConn 'postgres://root@roach-seattle-1:26257/chinook?sslmode=verify-full&sslrootcert=certs_crdb%2Fca.crt&sslcert=certs_crdb%2Fclient.root.crt&sslkey=certs_crdb%2Fclient.root.key' \
+  --tlsCertificate /certs_replicator_reverse/node.crt \
+  --tlsPrivateKey /certs_replicator_reverse/node.key
 
 echo
 echo 'Look at MOLT Replicator logs'
@@ -771,7 +908,7 @@ echo
 echo 'Get the CockroachCB cluster logical timestamp for the changefeed cursor parameter'
 pause
 
-CLUSTER_LOGICAL_TIMESTAMP=$(docker exec roach-seattle-1 cockroach sql --insecure --database chinook --format csv -e 'SELECT cluster_logical_timestamp()' | tail -n -1)
+CLUSTER_LOGICAL_TIMESTAMP=$(docker exec roach-seattle-1 cockroach --host=roach-seattle-1:26257 sql --certs-dir=certs --database chinook --format csv -e 'SELECT cluster_logical_timestamp()' | tail -n -1)
 
 echo
 echo "Cluster logical timestamp: $CLUSTER_LOGICAL_TIMESTAMP"
@@ -780,7 +917,7 @@ echo
 echo 'Create changefeed to MOLT Replicator'
 pause
 
-docker exec roach-seattle-1 cockroach sql --insecure --database chinook --format table -e \
+docker exec roach-seattle-1 cockroach --host=roach-seattle-1:26257 sql --certs-dir=certs --database chinook --format table -e \
 "CREATE CHANGEFEED FOR TABLE album, artist, customer, employee, genre, invoice, invoiceline, mediatype, playlist, playlisttrack, track
  INTO 'webhook-https://molt_replicator_host:30004/Chinook?client_cert=$NODE_CERT_BASE64_URL_ENCODED&client_key=$NODE_KEY_BASE64_URL_ENCODED&ca_cert=$CA_CERT_BASE64_URL_ENCODED' 
  WITH updated, 
@@ -793,6 +930,12 @@ docker exec roach-seattle-1 cockroach sql --insecure --database chinook --format
 echo
 echo 'Reverse replication is set up'
 pause
+
+echo
+echo 'Show the changefeed job'
+pause
+
+docker exec roach-seattle-1 cockroach --host=roach-seattle-1:26257 sql --certs-dir=certs --database chinook --format records -e 'SHOW CHANGEFEED JOBS'
 
 echo
 echo 'Switch application to start using CockroachDB'
@@ -812,13 +955,13 @@ echo 'First show the number of playlists in MySQL and CockroachDB'
 
 docker exec my-mysql-db mysql --password=$MYSQL_ROOT_PASSWORD --database=Chinook --table -e 'SELECT count(*) AS playlist_count_mysql FROM Playlist'
 echo  
-docker exec roach-seattle-1 cockroach sql --insecure --database chinook --format table -e 'SELECT count(*) AS playlist_count_cockroachdb FROM playlist'
+docker exec roach-seattle-1 cockroach --host=roach-seattle-1:26257 sql --certs-dir=certs --database chinook --format table -e 'SELECT count(*) AS playlist_count_cockroachdb FROM playlist'
 
 echo
-echo 'Insert a new playlist'
+echo 'Insert a new playlist on CockroachDB'
 pause
 
-docker exec roach-seattle-1 cockroach sql --insecure --database chinook --format table -e \
+docker exec roach-seattle-1 cockroach --host=roach-seattle-1:26257 sql --certs-dir=certs --database chinook --format table -e \
 "INSERT INTO PLAYLIST (playlistid, name) (
   WITH cte AS (
    SELECT max(playlistid) AS max_playlistid FROM playlist)
@@ -835,13 +978,34 @@ echo 'Again show the number of playlists in MySQL and CockroachDB'
 
 docker exec my-mysql-db mysql --password=$MYSQL_ROOT_PASSWORD --database=Chinook --table -e 'SELECT count(*) AS playlist_count_mysql FROM Playlist'
 echo
-docker exec roach-seattle-1 cockroach sql --insecure --database chinook --format table -e 'SELECT count(*) AS playlist_count_cockroachdb FROM playlist'
+docker exec roach-seattle-1 cockroach --host=roach-seattle-1:26257 sql --certs-dir=certs --database chinook --format table -e 'SELECT count(*) AS playlist_count_cockroachdb FROM playlist'
 
 echo
 echo 'Look at MOLT Replicator logs again'
 pause
 
 docker logs replicator_reverse
+
+echo
+echo 'After using CockroachDB long enough, when the customer is satisfied with the migration,'
+echo 'shut down reverse migration and shut down the original MySQL server'
+pause
+
+echo
+echo 'Stop the changefeed for MOLT Replicator for the reverse replication'
+pause
+
+docker exec roach-seattle-1 cockroach --host=roach-seattle-1:26257 sql --certs-dir=certs --database chinook --format records -e "CANCEL JOB (SELECT job_ID FROM [SHOW CHANGEFEED JOBS] WHERE status='running' ORDER BY created DESC LIMIT 1)"
+
+echo
+echo 'Stop MOLT Replicator reverse migration'
+
+docker stop replicator_reverse
+
+echo
+echo 'Stop MySQL'
+
+docker stop my-mysql-db
 
 echo
 echo '-- End of script --'
