@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/zsh
 
 # Set options for better shell script behavior
 # Per https://gist.github.com/mohanpedala/1e2ff5661761d3abd0385e8223e16425
@@ -18,40 +18,129 @@ set -euo pipefail
 # Uncomment to turn on shell tracing
 # set -x
 
+# Vaariable definitions
+# NOTE: You must expoert Variables that will be displayed expanded in displayed commands
+
 # Docker container versions (can specify "latest" too)
-MYSQL_VERSION='8.4.6'
-COCKROACHDB_VERSION='v25.2.8'
-HAPROXY_VERSION='1.7'
+export MYSQL_VERSION='8.4.6'
+export COCKROACHDB_VERSION='v25.2.8'
+export HAPROXY_VERSION='1.7'
 
 MYSQL_ROOT_PASSWORD='root_root_root'
-MYSQL_STARTUP_SLEEP=20
-REVERSE_REPLICATION_LATENCY_SLEEP=10
-NUM_NEW_ARTISTS_MYSQL=50
-NUM_NEW_ARTISTS_MYSQL2=10
-NUM_NEW_ALBUMS_MYSQL=50
+export MYSQL_STARTUP_SLEEP=20
+export REVERSE_REPLICATION_LATENCY_SLEEP=10
+export NUM_NEW_ARTISTS_MYSQL=50
+export NUM_NEW_ARTISTS_MYSQL2=10
+export NUM_NEW_ALBUMS_MYSQL=50
+export CDC_CURSOR=''
 
-# Script pause until user presses Enter key
+TEXT_WIDTH="100"
+STAGE=1
+TOTALSTAGES="9"
+
+if [[ "${1:-}" == "--nopause" ]]; then
+  NOPAUSE=1
+  else
+  NOPAUSE=0
+fi
+
 pause() {
-  echo ""
-  read -p "⏸️  Press [Enter] to continue to the next step..." _
-  echo ""
+  PAUSE_TEXT="⏸️   Press [Enter] to execute this step..."
+  if [[ $# -ne 0 ]]; then
+    PAUSE_TEXT="✅   Press [Enter] to continue to the next step..."
+  fi
+ 
+  if [[ $NOPAUSE == "1" ]]; then
+      sleep 1
+    else
+#USE THIS FOR BASH NOT KSH#      read -p "${PAUSE_TEXT}" 
+      read "?${PAUSE_TEXT}" 
+  fi
+  echo
 }
 
-echo 'Next step: Create the region network for Docker containers to use'
-pause
+print_text() {
+  if [ -n "$1" ]; then
+    echo "🛠️  $1" | fold -s -w $TEXT_WIDTH
+  fi
+}
 
-echo 'Creating the region network'
+# Print the command to be executed
+# Print it with a single blank line before and after the command
+# If the command already has any blank lines before or after the command, remove them.
+# Blank lines are either empty lines or lines that only contain whitespace
+# ref: https://stackoverflow.com/questions/12524308/bash-strip-trailing-linebreak-from-output
+print_cmd() {
+  param=$1
+  trailing_space_removed=${param%[[:space:]]}
+  leading_and_trailing_space_removed=${trailing_space_removed##[[:space:]]}
+  echo
+  echo "$leading_and_trailing_space_removed" | envsubst $2
+#STH#  echo "$1" | envsubst $2
+  echo
+}
+
+print_title() {
+  echo "🚀 [$STAGE/$TOTALSTAGES] $1..."
+  echo
+  ((STAGE++))
+}
+
+# Parameters:
+# 1: The stage title or empty string
+# 2: Text to describe the current step or empty string
+# 3: Command to display and execute
+#    The command may have leading or trailing blank lines
+#    (where a blank line is either an empty line or a line of only whitespace)
+#    The command may be multi-line, using backslash at the end of line as a continuation character
+#    The command may have variable references in it
+# 4: List of variables to be substituted, or the word "noexpand"
+#    The list is in the form $VAR1:$VAR2:$VAR3 including dollar signs (so enclose in single quotes).
+#    Any variables not listed will not be expanded in the displayed command
+# 5: [OPTIONAL] Whether to pause after displaying the command and before running it.
+#    To not pause at all, specify "nopause"
+#    To just pause after execution, specify "pause_after"
+#    To pause both before and after execution, do not specify this parameter at all
+do_stage() {
+  if [[ -n "$1" ]]; then
+    print_title "$1"
+  fi  
+  if [[ -n "$2" ]]; then
+    print_text "$2"
+  fi
+  echo
+  if [[ -n "$3" ]]; then
+    echo "Next command:"
+    echo "------------"
+    print_cmd "$3" "$4"
+    if [[ $# -ne 5 ]]; then
+        pause
+    fi
+    echo "---Running"
+    eval "$3" 
+    echo "---Done"
+    echo
+    if [[ $# -ne 5 ]]; then
+        pause post_icon
+    elif [[ "$5" == "pause_after" ]]; then
+        pause post_icon
+    fi
+  fi
+}
+
+TITLE='Create the region network for Docker containers to use'
+TEXT='Creating the region network'
+CMD=$(cat <<'EOFHERE'
 docker network create --driver=bridge --subnet=172.27.0.0/16 --ip-range=172.27.0.0/24 --gateway=172.27.0.1 us-west2-net
+EOFHERE
+)
+do_stage "$TITLE" "$TEXT" "$CMD" ''
 
-echo
-echo 'Setting up MySQL...'
-echo
-echo 'Start MySQL'
-pause
+TITLE='Setting up MySQL...'
+TEXT='Start MySQL
 
-# Start MySQL
-# Ref: https://hub.docker.com/_/mysql
-
+Ref: https://hub.docker.com/_/mysql'
+CMD=$(cat <<'EOFHERE'
 docker run \
  -d \
  --name my-mysql-db \
@@ -62,209 +151,374 @@ docker run \
  -p 3306:3306 \
  -v ./mysql_files:/mysql_files:ro \
  mysql:$MYSQL_VERSION
+EOFHERE
+)
+do_stage "$TITLE" "$TEXT" "$CMD" '$MYSQL_VERSION'
 
-echo
-echo "Sleeping $MYSQL_STARTUP_SLEEP seconds..."
-echo '(imagine seeing dumb jokes being displayed every few seconds to pass the time)'
-echo
-echo 'MySQL needs to be given time to become ready for connections.'
-echo 'This is different from CockroachDB, which does not return control after being'
-echo 'started until it is ready to accept connections.'
-echo
-echo 'This initial wait happens in 2 steps:'
-echo "1. Sleep unconditionally for a while (in this case $MYSQL_STARTUP_SLEEP seconds)."
-echo '2. Additionally, wait for an admin MySQL ping command to return (it will block until MySQL is ready).'
+TEXT="Sleeping $MYSQL_STARTUP_SLEEP seconds...
+
+(imagine seeing dumb jokes being displayed every few seconds to pass the time)
+
+MySQL needs to be given time to become ready for connections.
+This is different from CockroachDB, which does not return control after being
+started until it is ready to accept connections.
+
+This initial wait happens in 2 steps:
+1. Sleep unconditionally for a while (in this case $MYSQL_STARTUP_SLEEP seconds).
+2. Additionally, wait for an admin MySQL ping command to return (it will block until MySQL is ready)."
+CMD=$(cat <<'EOFHERE'
 sleep $MYSQL_STARTUP_SLEEP
+EOFHERE
+)
+do_stage '' "$TEXT" "$CMD" '$MYSQL_STARTUP_SLEEP' nopause
 
-echo
-echo "MySQL has started.  Waiting for it to start accepting connections..."
-docker exec -it my-mysql-db mysqladmin ping -h localhost -u root --password=$MYSQL_ROOT_PASSWORD --wait=30
+TEXT="MySQL has started.  Waiting for it to start accepting connections..."
+CMD=$(cat <<'EOFHERE'
+docker exec my-mysql-db \
+ mysqladmin ping -h localhost -u root --password=$MYSQL_ROOT_PASSWORD --wait=30
+EOFHERE
+)
+do_stage '' "$TEXT" "$CMD" noexpand pause_after
 
-echo
-echo 'Initial set of databases:'
-docker exec my-mysql-db mysql --password=$MYSQL_ROOT_PASSWORD --table -e 'SHOW DATABASES'
+TEXT='Initial set of databases:'
+CMD=$(cat <<'EOFHERE'
+docker exec my-mysql-db \
+ mysql --password=$MYSQL_ROOT_PASSWORD --table -e \
+  'SHOW DATABASES'
+EOFHERE
+)
+do_stage '' "$TEXT" "$CMD" noexpand
 
-echo
-echo 'Create database schema and populate with initial data'
-pause
+TEXT='Create database schema and populate with initial data'
+CMD=$(cat <<'EOFHERE'
+docker exec -i my-mysql-db \
+ mysql --password=$MYSQL_ROOT_PASSWORD < MySQL_files/Chinook_MySql.sql
+EOFHERE
+)
+do_stage '' "$TEXT" "$CMD" noexpand
 
-docker exec -i my-mysql-db mysql --password=$MYSQL_ROOT_PASSWORD < MySQL_files/Chinook_MySql.sql
+TEXT='List databases and tables in Chinook database'
+CMD=$(cat <<'EOFHERE'
+docker exec my-mysql-db \
+ mysql --password=$MYSQL_ROOT_PASSWORD --table -e \
+  'SHOW DATABASES'
+EOFHERE
+)
+do_stage '' "$TEXT" "$CMD" noexpand nopause
 
-echo
-echo 'List databases and tables in Chinook database'
-pause
+CMD=$(cat <<'EOFHERE'
+docker exec my-mysql-db \
+ mysql --password=$MYSQL_ROOT_PASSWORD --database=Chinook --table -e \
+  'SHOW TABLES'
+EOFHERE
+)
+do_stage '' '' "$CMD" noexpand pause_after
 
-docker exec my-mysql-db mysql --password=$MYSQL_ROOT_PASSWORD --table -e 'SHOW DATABASES'
-docker exec my-mysql-db mysql --password=$MYSQL_ROOT_PASSWORD --database=Chinook --table -e 'SHOW TABLES'
+TEXT='Look at data samples
 
-echo
-echo 'Look at data samples'
-pause
+Album:'
+CMD=$(cat <<'EOFHERE'
+docker exec my-mysql-db \
+ mysql --password=$MYSQL_ROOT_PASSWORD --database=Chinook --table -e \
+  'SELECT * FROM Album ORDER BY AlbumID LIMIT 5'
+EOFHERE
+)
+do_stage '' "$TEXT" "$CMD" noexpand nopause
 
-echo 'Album:'
-docker exec my-mysql-db mysql --password=$MYSQL_ROOT_PASSWORD --database=Chinook --table -e 'SELECT * FROM Album ORDER BY AlbumID LIMIT 5'
-echo
-echo 'Artist:'
-docker exec my-mysql-db mysql --password=$MYSQL_ROOT_PASSWORD --database=Chinook --table -e 'SELECT * FROM Artist ORDER BY ArtistID LIMIT 5'
-echo
-echo 'Customer:'
-docker exec my-mysql-db mysql --password=$MYSQL_ROOT_PASSWORD --database=Chinook --table -e 'SELECT * FROM Customer ORDER BY CustomerID LIMIT 2\G'
-echo
-echo 'Employee:'
-docker exec my-mysql-db mysql --password=$MYSQL_ROOT_PASSWORD --database=Chinook --table -e 'SELECT * FROM Employee ORDER BY EmployeeID LIMIT 2\G'
-echo
-echo 'Genre:'
-docker exec my-mysql-db mysql --password=$MYSQL_ROOT_PASSWORD --database=Chinook --table -e 'SELECT * FROM Genre ORDER BY GenreID LIMIT 5'
-echo
-echo 'Invoice:'
-docker exec my-mysql-db mysql --password=$MYSQL_ROOT_PASSWORD --database=Chinook --table -e 'SELECT * FROM Invoice ORDER BY InvoiceID LIMIT 5'
-echo
-echo 'InvoiceLine:'
-docker exec my-mysql-db mysql --password=$MYSQL_ROOT_PASSWORD --database=Chinook --table -e 'SELECT * FROM InvoiceLine ORDER BY InvoiceLineID LIMIT 5'
-echo
-echo 'MediaType:'
-docker exec my-mysql-db mysql --password=$MYSQL_ROOT_PASSWORD --database=Chinook --table -e 'SELECT * FROM MediaType ORDER BY MediaTypeID LIMIT 5'
-echo
-echo 'Playlist:'
-docker exec my-mysql-db mysql --password=$MYSQL_ROOT_PASSWORD --database=Chinook --table -e 'SELECT * FROM Playlist ORDER BY PlaylistID LIMIT 5'
-echo
-echo 'PlaylistTrack:'
-docker exec my-mysql-db mysql --password=$MYSQL_ROOT_PASSWORD --database=Chinook --table -e 'SELECT * FROM PlaylistTrack ORDER BY TrackID LIMIT 5'
-echo
-echo 'Track:'
-docker exec my-mysql-db mysql --password=$MYSQL_ROOT_PASSWORD --database=Chinook --table -e 'SELECT * FROM Track ORDER BY TrackID LIMIT 3\G'
+TEXT='Artist:'
+CMD=$(cat <<'EOFHERE'
+docker exec my-mysql-db \
+ mysql --password=$MYSQL_ROOT_PASSWORD --database=Chinook --table -e \
+  'SELECT * FROM Artist ORDER BY ArtistID LIMIT 5'
+EOFHERE
+)
+do_stage '' "$TEXT" "$CMD" noexpand nopause
 
-echo
-echo 'Configure GTID-based replication...'
-echo
-echo 'Reference: https://dev.mysql.com/doc/refman/8.4/en/replication-mode-change-online-enable-gtids.html'
-echo
-echo 'Show the initial GTID settings'
-pause
-echo
+TEXT='Customer:'
+CMD=$(cat <<'EOFHERE'
+docker exec my-mysql-db \
+ mysql --password=$MYSQL_ROOT_PASSWORD --database=Chinook --table -e \
+  'SELECT * FROM Customer ORDER BY CustomerID LIMIT 2\G'
+EOFHERE
+)
+do_stage '' "$TEXT" "$CMD" noexpand nopause
 
-docker exec my-mysql-db mysql --password=$MYSQL_ROOT_PASSWORD --table -e 'SHOW VARIABLES LIKE '\''%gtid%'\'
-echo
+TEXT='Employee:'
+CMD=$(cat <<'EOFHERE'
+docker exec my-mysql-db \
+ mysql --password=$MYSQL_ROOT_PASSWORD --database=Chinook --table -e \
+  'SELECT * FROM Employee ORDER BY EmployeeID LIMIT 2\G'
+EOFHERE
+)
+do_stage '' "$TEXT" "$CMD" noexpand nopause
 
-echo 'Next step: set enforce_gtid_consistency to WARN'
-pause
-echo
+TEXT='Genre:'
+CMD=$(cat <<'EOFHERE'
+docker exec my-mysql-db \
+ mysql --password=$MYSQL_ROOT_PASSWORD --database=Chinook --table -e \
+  'SELECT * FROM Genre ORDER BY GenreID LIMIT 5'
+EOFHERE
+)
+do_stage '' "$TEXT" "$CMD" noexpand nopause
 
-docker exec my-mysql-db mysql --password=$MYSQL_ROOT_PASSWORD --table -e 'SET @@GLOBAL.enforce_gtid_consistency = WARN'
-echo
-docker exec my-mysql-db mysql --password=$MYSQL_ROOT_PASSWORD --table -e 'SHOW VARIABLES LIKE '\''%gtid%'\'
-echo
+TEXT='Invoice:'
+CMD=$(cat <<'EOFHERE'
+docker exec my-mysql-db \
+ mysql --password=$MYSQL_ROOT_PASSWORD --database=Chinook --table -e \
+  'SELECT * FROM Invoice ORDER BY InvoiceID LIMIT 5'
+EOFHERE
+)
+do_stage '' "$TEXT" "$CMD" noexpand nopause
 
-echo 'Next step: set enforce_gtid_consistency to ON'
-pause
-echo
+TEXT='InvoiceLine:'
+CMD=$(cat <<'EOFHERE'
+docker exec my-mysql-db \
+ mysql --password=$MYSQL_ROOT_PASSWORD --database=Chinook --table -e \
+  'SELECT * FROM InvoiceLine ORDER BY InvoiceLineID LIMIT 5'
+EOFHERE
+)
+do_stage '' "$TEXT" "$CMD" noexpand nopause
 
-docker exec my-mysql-db mysql --password=$MYSQL_ROOT_PASSWORD --table -e 'SET @@GLOBAL.enforce_gtid_consistency = ON'
-echo
-docker exec my-mysql-db mysql --password=$MYSQL_ROOT_PASSWORD --table -e 'SHOW VARIABLES LIKE '\''%gtid%'\'
-echo
+TEXT='MediaType:'
+CMD=$(cat <<'EOFHERE'
+docker exec my-mysql-db \
+ mysql --password=$MYSQL_ROOT_PASSWORD --database=Chinook --table -e \
+  'SELECT * FROM MediaType ORDER BY MediaTypeID LIMIT 5'
+EOFHERE
+)
+do_stage '' "$TEXT" "$CMD" noexpand nopause
 
-echo 'Next step: set gtid_mode to OFF_PERMISSIVE'
-pause
-echo
+TEXT='Playlist:'
+CMD=$(cat <<'EOFHERE'
+docker exec my-mysql-db \
+ mysql --password=$MYSQL_ROOT_PASSWORD --database=Chinook --table -e \
+  'SELECT * FROM Playlist ORDER BY PlaylistID LIMIT 5'
+EOFHERE
+)
+do_stage '' "$TEXT" "$CMD" noexpand nopause
 
-docker exec my-mysql-db mysql --password=$MYSQL_ROOT_PASSWORD --table -e 'SET @@GLOBAL.gtid_mode = OFF_PERMISSIVE'
-echo
-docker exec my-mysql-db mysql --password=$MYSQL_ROOT_PASSWORD --table -e 'SHOW VARIABLES LIKE '\''%gtid%'\'
-echo
+TEXT='PlaylistTrack:'
+CMD=$(cat <<'EOFHERE'
+docker exec my-mysql-db \
+ mysql --password=$MYSQL_ROOT_PASSWORD --database=Chinook --table -e \
+  'SELECT * FROM PlaylistTrack ORDER BY TrackID LIMIT 5'
+EOFHERE
+)
+do_stage '' "$TEXT" "$CMD" noexpand nopause
 
-echo 'Next step: set gtid_mode to ON_PERMISSIVE'
-pause
-echo
+TEXT='Track:'
+CMD=$(cat <<'EOFHERE'
+docker exec my-mysql-db \
+ mysql --password=$MYSQL_ROOT_PASSWORD --database=Chinook --table -e \
+  'SELECT * FROM Track ORDER BY TrackID LIMIT 3\G'
+EOFHERE
+)
+do_stage '' "$TEXT" "$CMD" noexpand pause_after
 
-docker exec my-mysql-db mysql --password=$MYSQL_ROOT_PASSWORD --table -e 'SET @@GLOBAL.gtid_mode = ON_PERMISSIVE'
-echo
-docker exec my-mysql-db mysql --password=$MYSQL_ROOT_PASSWORD --table -e 'SHOW VARIABLES LIKE '\''%gtid%'\'
-echo
+TEXT='Configure GTID-based replication...
 
-echo 'Next step: set binlog_row_metadata to FULL'
-pause
-echo
-docker exec my-mysql-db mysql --password=$MYSQL_ROOT_PASSWORD --table -e 'SET @@GLOBAL.BINLOG_ROW_METADATA = FULL'
-echo
-docker exec my-mysql-db mysql --password=$MYSQL_ROOT_PASSWORD --table -e 'SHOW VARIABLES LIKE '\''%binlog%'\'
+Reference: https://dev.mysql.com/doc/refman/8.4/en/replication-mode-change-online-enable-gtids.html
 
-echo 'Next step: Check for ongoing transactions'
-pause
-echo
+Show the initial GTID settings'
+CMD=$(cat <<'EOFHERE'
+docker exec my-mysql-db \
+ mysql --password=$MYSQL_ROOT_PASSWORD --table -e \
+  'SHOW VARIABLES LIKE '\''%gtid%'\'
+EOFHERE
+)
+do_stage '' "$TEXT" "$CMD" noexpand
 
-docker exec my-mysql-db mysql --password=$MYSQL_ROOT_PASSWORD --table -e 'SHOW STATUS LIKE '\''Ongoing%'\'
-echo
+TEXT='Next step: set enforce_gtid_consistency to WARN'
+CMD=$(cat <<'EOFHERE'
+docker exec my-mysql-db \
+ mysql --password=$MYSQL_ROOT_PASSWORD --table -e \
+  'SET @@GLOBAL.enforce_gtid_consistency = WARN'
+EOFHERE
+)
+do_stage '' "$TEXT" "$CMD" noexpand nopause
 
-echo 'Next step: set gtid_mode to ON'
-pause
-echo
+CMD=$(cat <<'EOFHERE'
+docker exec my-mysql-db \
+ mysql --password=$MYSQL_ROOT_PASSWORD --table -e \
+  'SHOW VARIABLES LIKE '\''%gtid%'\'
+EOFHERE
+)
+do_stage '' '' "$CMD" noexpand nopause
 
-docker exec my-mysql-db mysql --password=$MYSQL_ROOT_PASSWORD --table -e 'SET @@GLOBAL.GTID_MODE = ON'
-echo
-docker exec my-mysql-db mysql --password=$MYSQL_ROOT_PASSWORD --table -e 'SHOW VARIABLES LIKE '\''%gtid%'\'
-echo
+TEXT='Next step: set enforce_gtid_consistency to ON'
+CMD=$(cat <<'EOFHERE'
+docker exec my-mysql-db \
+ mysql --password=$MYSQL_ROOT_PASSWORD --table -e \
+  'SET @@GLOBAL.enforce_gtid_consistency = ON'
+EOFHERE
+)
+do_stage '' "$TEXT" "$CMD" noexpand nopause
+
+CMD=$(cat <<'EOFHERE'
+docker exec my-mysql-db \
+ mysql --password=$MYSQL_ROOT_PASSWORD --table -e \
+  'SHOW VARIABLES LIKE '\''%gtid%'\'
+EOFHERE
+)
+do_stage '' '' "$CMD" noexpand nopause
+
+TEXT='Next step: set gtid_mode to OFF_PERMISSIVE'
+CMD=$(cat <<'EOFHERE'
+docker exec my-mysql-db \
+ mysql --password=$MYSQL_ROOT_PASSWORD --table -e \
+  'SET @@GLOBAL.gtid_mode = OFF_PERMISSIVE'
+EOFHERE
+)
+do_stage '' "$TEXT" "$CMD" noexpand nopause
+
+CMD=$(cat <<'EOFHERE'
+docker exec my-mysql-db \
+ mysql --password=$MYSQL_ROOT_PASSWORD --table -e \
+  'SHOW VARIABLES LIKE '\''%gtid%'\'
+EOFHERE
+)
+do_stage '' '' "$CMD" noexpand nopause
+
+TEXT='Next step: set gtid_mode to ON_PERMISSIVE'
+CMD=$(cat <<'EOFHERE'
+docker exec my-mysql-db \
+ mysql --password=$MYSQL_ROOT_PASSWORD --table -e \
+  'SET @@GLOBAL.gtid_mode = ON_PERMISSIVE'
+EOFHERE
+)
+do_stage '' "$TEXT" "$CMD" noexpand nopause
+
+CMD=$(cat <<'EOFHERE'
+docker exec my-mysql-db \
+ mysql --password=$MYSQL_ROOT_PASSWORD --table -e \
+  'SHOW VARIABLES LIKE '\''%gtid%'\'
+EOFHERE
+)
+do_stage '' '' "$CMD" noexpand nopause
+
+TEXT='Next step: set binlog_row_metadata to FULL'
+CMD=$(cat <<'EOFHERE'
+docker exec my-mysql-db \
+ mysql --password=$MYSQL_ROOT_PASSWORD --table -e \
+  'SET @@GLOBAL.BINLOG_ROW_METADATA = FULL'
+EOFHERE
+)
+do_stage '' "$TEXT" "$CMD" noexpand nopause
+
+CMD=$(cat <<'EOFHERE'
+docker exec my-mysql-db \
+ mysql --password=$MYSQL_ROOT_PASSWORD --table -e \
+  'SHOW VARIABLES LIKE '\''%binlog%'\'
+EOFHERE
+)
+do_stage '' '' "$CMD" noexpand nopause
+
+TEXT='Next step: Check for ongoing transactions'
+CMD=$(cat <<'EOFHERE'
+docker exec my-mysql-db \
+ mysql --password=$MYSQL_ROOT_PASSWORD --table -e \
+  'SHOW STATUS LIKE '\''Ongoing%'\'
+EOFHERE
+)
+do_stage '' "$TEXT" "$CMD" noexpand nopause
+
+TEXT='Next step: set gtid_mode to ON'
+CMD=$(cat <<'EOFHERE'
+docker exec my-mysql-db \
+ mysql --password=$MYSQL_ROOT_PASSWORD --table -e \
+  'SET @@GLOBAL.GTID_MODE = ON'
+EOFHERE
+)
+do_stage '' "$TEXT" "$CMD" noexpand nopause
+
+CMD=$(cat <<'EOFHERE'
+docker exec my-mysql-db \
+ mysql --password=$MYSQL_ROOT_PASSWORD --table -e \
+  'SHOW VARIABLES LIKE '\''%gtid%'\'
 
 sleep 1
+EOFHERE
+)
+do_stage '' '' "$CMD" noexpand pause_after
 
-echo 'Generate some synthetic write traffic to get the first binary log to be flushed.'
-echo 'At that point there will be a start and end to the GTID so GTID-based'
-echo 'replication can start to be used.'
-echo
-echo 'Create a temporary database for the synthetic write traffic'
-pause
+TEXT='Generate some synthetic write traffic to get the first binary log to be flushed.
 
-docker exec my-mysql-db mysql --password=$MYSQL_ROOT_PASSWORD --table -e 'CREATE DATABASE temp_delete'
+At that point there will be a start and end to the GTID so GTID-based
+replication can start to be used.
 
-echo
-echo 'Create a table in the temporary database'
-pause
+Create a temporary database for the synthetic write traffic'
 
-docker exec my-mysql-db mysql --password=$MYSQL_ROOT_PASSWORD --database=temp_delete --table \
- -e 'CREATE TABLE t (pk SERIAL PRIMARY KEY, fname VARCHAR(100), lname VARCHAR(100), age integer)'
+CMD=$(cat <<'EOFHERE'
+docker exec my-mysql-db \
+ mysql --password=$MYSQL_ROOT_PASSWORD --table -e \
+  'CREATE DATABASE temp_delete'
+EOFHERE
+)
+do_stage '' "$TEXT" "$CMD" noexpand
 
-echo
-echo 'Populate the table with some data'
-pause
+TEXT='Create a table in the temporary database'
+CMD=$(cat <<'EOFHERE'
+docker exec my-mysql-db \
+ mysql --password=$MYSQL_ROOT_PASSWORD --database=temp_delete --table -e \
+  'CREATE TABLE t (pk SERIAL PRIMARY KEY, fname VARCHAR(100), lname VARCHAR(100), age integer)'
+EOFHERE
+)
+do_stage '' "$TEXT" "$CMD" noexpand
 
-docker exec my-mysql-db mysql --password=$MYSQL_ROOT_PASSWORD --database=temp_delete --table -e \
-"INSERT INTO t (fname, lname, age) 
-  (WITH RECURSIVE NumberSeries AS (
-    SELECT 1 AS n -- Anchor member: starting value
-    UNION ALL
-    SELECT n + 1 FROM NumberSeries WHERE n < 1000 -- Recursive member: increments and termination condition
-  )
-  SELECT concat('F', CAST((rand()*100.0) AS SIGNED)), concat('L', CAST((rand()*100.0) AS SIGNED)), CAST((rand()*100.0) AS SIGNED) 
-  FROM NumberSeries)"
+TEXT='Populate the table with some data
+
+(Note we have to use a recursive CTE to generate a series of numbers)'
+CMD=$(cat <<'EOFHERE'
+docker exec my-mysql-db \
+ mysql --password=$MYSQL_ROOT_PASSWORD --database=temp_delete --table -e \
+  "INSERT INTO t (fname, lname, age) 
+    (WITH RECURSIVE NumberSeries AS (
+      SELECT 1 AS n -- Anchor member: starting value
+      UNION ALL
+      SELECT n + 1 FROM NumberSeries WHERE n < 1000 -- Recursive member: increments and termination condition
+    )
+    SELECT concat('F', CAST((rand()*100.0) AS SIGNED)), concat('L', CAST((rand()*100.0) AS SIGNED)), CAST((rand()*100.0) AS SIGNED) 
+    FROM NumberSeries)"
 
 sleep 2
+EOFHERE
+)
+do_stage '' "$TEXT" "$CMD" noexpand
 
-echo
-echo 'Some rows just added:'
+TEXT='See some rows just added:'
+CMD=$(cat <<'EOFHERE'
+docker exec my-mysql-db \
+ mysql --password=$MYSQL_ROOT_PASSWORD --database=temp_delete --table -e \
+  "SELECT * FROM t LIMIT 10"
+EOFHERE
+)
+do_stage '' "$TEXT" "$CMD" noexpand
 
-docker exec my-mysql-db mysql --password=$MYSQL_ROOT_PASSWORD --database=temp_delete --table -e "SELECT * FROM t LIMIT 10"
+TEXT='Verify the first binary log has been flushed.
 
-echo
-echo 'Verify the first binary log has been flushed.'
-echo 'This query should return a result.'
-echo 'Even if it does not, proceed anyway - we will check this again later, right before we need it.'
-pause
+This query should return a result.
+Even if it does not, proceed anyway - we will check this again later, right before we need it.'
+CMD=$(cat <<'EOFHERE'
+docker exec my-mysql-db \
+ mysql --password=$MYSQL_ROOT_PASSWORD --table -e \
+  'SELECT @@global.gtid_executed'
+EOFHERE
+)
+do_stage '' "$TEXT" "$CMD" noexpand
 
-docker exec my-mysql-db mysql --password=$MYSQL_ROOT_PASSWORD --table -e 'SELECT @@global.gtid_executed'
+TITLE='Setting up CockroachDB...'
 
 # Set up CockroachDB
 # Ref: https://www.cockroachlabs.com/blog/simulate-cockroachdb-cluster-localhost-docker/
 
-echo
-echo 'Setting up CockroachDB...'
-echo
+TEXT='Next step: Create the haproxy.cfg file for HAProxy
 
-echo 'Next step: Create the haproxy.cfg file for HAProxy'
-pause
-echo 'Creating the haproxy.cfg file'
+Creating the haproxy.cfg file'
 
+CMD=$(cat <<'EOFHERE'
 mkdir -p haproxy_data/us-west2
-cat - >haproxy_data/us-west2/haproxy.cfg <<EOF
+
+cat - >haproxy_data/us-west2/haproxy.cfg <<'EOFHERE2'
 
 global
   maxconn 4096
@@ -288,11 +542,13 @@ listen psql
     server cockroach5 roach-seattle-2:26257 check port 8080
     server cockroach6 roach-seattle-3:26257 check port 8080
 
-EOF
+EOFHERE2
+EOFHERE
+)
+do_stage "$TITLE" "$TEXT" "$CMD" noexpand
 
-echo 'Next step: Generate certificate authority (CA) certificate and private key for CockroachDB'
-pause
-
+TEXT='Next step: Generate certificate authority (CA) certificate and private key for CockroachDB'
+CMD=$(cat <<'EOFHERE'
 mkdir certs_cockroachdb_ca my_safe_directory_cockroachdb
 
 docker run \
@@ -301,17 +557,18 @@ docker run \
  -v ./certs_cockroachdb_ca:/certs_cockroachdb_ca \
  -v ./my_safe_directory_cockroachdb:/my_safe_directory_cockroachdb \
  cockroachdb/cockroach:$COCKROACHDB_VERSION \
- cert create-ca \
-  --certs-dir=/certs_cockroachdb_ca \
-  --ca-key=/my_safe_directory_cockroachdb/ca.key
+  cert create-ca \
+   --certs-dir=/certs_cockroachdb_ca \
+   --ca-key=/my_safe_directory_cockroachdb/ca.key
 
 echo
 ls -l certs_cockroachdb_ca my_safe_directory_cockroachdb
+EOFHERE
+)
+do_stage '' "$TEXT" "$CMD" noexpand
 
-echo
-echo 'Next step: Generate Cockroachdb node 1 certificate and private key'
-pause
-
+TEXT='Next step: Generate Cockroachdb node 1 certificate and private key'
+CMD=$(cat <<'EOFHERE'
 mkdir certs_cockroachdb_1
 cp -i certs_cockroachdb_ca/ca.crt certs_cockroachdb_1
 
@@ -321,18 +578,19 @@ docker run \
  -v ./certs_cockroachdb_1:/certs_cockroachdb_1 \
  -v ./my_safe_directory_cockroachdb:/my_safe_directory_cockroachdb \
  cockroachdb/cockroach:$COCKROACHDB_VERSION \
- cert create-node \
-  roach-seattle-1 \
-  --certs-dir=/certs_cockroachdb_1 \
-  --ca-key=/my_safe_directory_cockroachdb/ca.key 
+  cert create-node \
+   roach-seattle-1 \
+   --certs-dir=/certs_cockroachdb_1 \
+   --ca-key=/my_safe_directory_cockroachdb/ca.key 
 
 echo
 ls -l certs_cockroachdb_1 my_safe_directory_cockroachdb
+EOFHERE
+)
+do_stage '' "$TEXT" "$CMD" '$COCKROACHDB_VERSION'
 
-echo
-echo 'Next step: Generate Cockroachdb node 2 certificate and private key'
-pause
-
+TEXT='Next step: Generate Cockroachdb node 2 certificate and private key'
+CMD=$(cat <<'EOFHERE'
 mkdir certs_cockroachdb_2
 cp -i certs_cockroachdb_ca/ca.crt certs_cockroachdb_2
 
@@ -342,18 +600,19 @@ docker run \
  -v ./certs_cockroachdb_2:/certs_cockroachdb_2 \
  -v ./my_safe_directory_cockroachdb:/my_safe_directory_cockroachdb \
  cockroachdb/cockroach:$COCKROACHDB_VERSION \
- cert create-node \
-  roach-seattle-2 \
-  --certs-dir=/certs_cockroachdb_2 \
-  --ca-key=/my_safe_directory_cockroachdb/ca.key 
+  cert create-node \
+   roach-seattle-2 \
+   --certs-dir=/certs_cockroachdb_2 \
+   --ca-key=/my_safe_directory_cockroachdb/ca.key 
 
 echo
 ls -l certs_cockroachdb_2 my_safe_directory_cockroachdb
+EOFHERE
+)
+do_stage '' "$TEXT" "$CMD" '$COCKROACHDB_VERSION'
 
-echo
-echo 'Next step: Generate Cockroachdb node 3 certificate and private key'
-pause
-
+TEXT='Next step: Generate Cockroachdb node 3 certificate and private key'
+CMD=$(cat <<'EOFHERE'
 mkdir certs_cockroachdb_3
 cp -i certs_cockroachdb_ca/ca.crt certs_cockroachdb_3
 
@@ -363,18 +622,19 @@ docker run \
  -v ./certs_cockroachdb_3:/certs_cockroachdb_3 \
  -v ./my_safe_directory_cockroachdb:/my_safe_directory_cockroachdb \
  cockroachdb/cockroach:$COCKROACHDB_VERSION \
- cert create-node \
-  roach-seattle-3 \
-  --certs-dir=/certs_cockroachdb_3 \
-  --ca-key=/my_safe_directory_cockroachdb/ca.key 
+  cert create-node \
+   roach-seattle-3 \
+   --certs-dir=/certs_cockroachdb_3 \
+   --ca-key=/my_safe_directory_cockroachdb/ca.key 
 
 echo
 ls -l certs_cockroachdb_3 my_safe_directory_cockroachdb
+EOFHERE
+)
+do_stage '' "$TEXT" "$CMD" '$COCKROACHDB_VERSION'
 
-echo
-echo 'Next step: Generate root client certificate and private key'
-pause
-
+TEXT='Next step: Generate root client certificate and private key'
+CMD=$(cat <<'EOFHERE'
 mkdir certs_cockroachdb_clients
 cp -i certs_cockroachdb_ca/ca.crt certs_cockroachdb_clients
 
@@ -384,10 +644,10 @@ docker run \
  -v ./certs_cockroachdb_clients:/certs_cockroachdb_clients \
  -v ./my_safe_directory_cockroachdb:/my_safe_directory_cockroachdb \
  cockroachdb/cockroach:$COCKROACHDB_VERSION \
- cert create-client \
-  root \
-  --certs-dir=/certs_cockroachdb_clients \
-  --ca-key=/my_safe_directory_cockroachdb/ca.key
+  cert create-client \
+   root \
+   --certs-dir=/certs_cockroachdb_clients \
+   --ca-key=/my_safe_directory_cockroachdb/ca.key
 
 cp -i certs_cockroachdb_clients/client.root.crt certs_cockroachdb_1
 cp -i certs_cockroachdb_clients/client.root.key certs_cockroachdb_1
@@ -398,14 +658,14 @@ cp -i certs_cockroachdb_clients/client.root.key certs_cockroachdb_3
 
 echo
 ls -l certs_cockroachdb_clients certs_cockroachdb_1 certs_cockroachdb_2 certs_cockroachdb_3 my_safe_directory_cockroachdb
+EOFHERE
+)
+do_stage '' "$TEXT" "$CMD" '$COCKROACHDB_VERSION'
 
-echo
-echo 'Next step: Create the Docker containers for the 3 CockroachDB nodes'
-pause
-echo 'Creating the Docker container for CockroachDB 1 in Seattle'
+TEXT='Next step: Create the Docker containers for the 3 CockroachDB nodes
 
-# Create the Docker containers for the 3 CockroachDB nodes
-
+Creating the Docker container for CockroachDB 1 in Seattle'
+CMD=$(cat <<'EOFHERE'
 mkdir roach-seattle-1-data
 
 docker run \
@@ -423,21 +683,21 @@ docker run \
  -v ./roach-seattle-1-data:/cockroach/cockroach-data \
  -v ./CockroachDB_files:/CockroachDB_files:ro \
  cockroachdb/cockroach:$COCKROACHDB_VERSION \
- start \
-  --certs-dir=certs \
-  --store=cockroach-data,ballast-size=0 \
-  --advertise-addr=roach-seattle-1:26357 \
-  --listen-addr=roach-seattle-1:26357 \
-  --http-addr=roach-seattle-1:8080 \
-  --sql-addr=roach-seattle-1:26257 \
-  --join=roach-seattle-1:26357,roach-seattle-2:26357,roach-seattle-3:26357 \
-  --locality=region=us-west2,zone=a
+  start \
+   --certs-dir=certs \
+   --store=cockroach-data,ballast-size=0 \
+   --advertise-addr=roach-seattle-1:26357 \
+   --listen-addr=roach-seattle-1:26357 \
+   --http-addr=roach-seattle-1:8080 \
+   --sql-addr=roach-seattle-1:26257 \
+   --join=roach-seattle-1:26357,roach-seattle-2:26357,roach-seattle-3:26357 \
+   --locality=region=us-west2,zone=a
+EOFHERE
+)
+do_stage '' "$TEXT" "$CMD" '$COCKROACHDB_VERSION'
 
-echo
-echo 'Next step: Create the Docker container for CockroachDB 2 in Seattle'
-pause
-echo 'Creating the Docker container for CockroachDB 2 in Seattle'
-
+TEXT='Next step: Create the Docker container for CockroachDB 2 in Seattle'
+CMD=$(cat <<'EOFHERE'
 mkdir roach-seattle-2-data
 
 docker run \
@@ -455,21 +715,21 @@ docker run \
  -v ./roach-seattle-2-data:/cockroach/cockroach-data \
  -v ./CockroachDB_files:/CockroachDB_files:ro \
  cockroachdb/cockroach:$COCKROACHDB_VERSION \
- start \
-  --certs-dir=certs \
-  --store=cockroach-data,ballast-size=0 \
-  --advertise-addr=roach-seattle-2:26357 \
-  --listen-addr=roach-seattle-2:26357 \
-  --http-addr=roach-seattle-2:8080 \
-  --sql-addr=roach-seattle-2:26257 \
-  --join=roach-seattle-1:26357,roach-seattle-2:26357,roach-seattle-3:26357 \
-  --locality=region=us-west2,zone=b
+  start \
+   --certs-dir=certs \
+   --store=cockroach-data,ballast-size=0 \
+   --advertise-addr=roach-seattle-2:26357 \
+   --listen-addr=roach-seattle-2:26357 \
+   --http-addr=roach-seattle-2:8080 \
+   --sql-addr=roach-seattle-2:26257 \
+   --join=roach-seattle-1:26357,roach-seattle-2:26357,roach-seattle-3:26357 \
+   --locality=region=us-west2,zone=b
+EOFHERE
+)
+do_stage '' "$TEXT" "$CMD" '$COCKROACHDB_VERSION'
 
-echo
-echo 'Next step: Create the Docker container for CockroachDB 3 in Seattle'
-pause
-echo 'Creating the Docker container for CockroachDB 3 in Seattle'
-
+TEXT='Next step: Create the Docker container for CockroachDB 3 in Seattle'
+CMD=$(cat <<'EOFHERE'
 mkdir roach-seattle-3-data
 
 docker run \
@@ -487,21 +747,21 @@ docker run \
  -v ./roach-seattle-3-data:/cockroach/cockroach-data \
  -v ./CockroachDB_files:/CockroachDB_files:ro \
  cockroachdb/cockroach:$COCKROACHDB_VERSION \
- start \
-  --certs-dir=certs \
-  --store=cockroach-data,ballast-size=0 \
-  --advertise-addr=roach-seattle-3:26357 \
-  --listen-addr=roach-seattle-3:26357 \
-  --http-addr=roach-seattle-3:8080 \
-  --sql-addr=roach-seattle-3:26257 \
-  --join=roach-seattle-1:26357,roach-seattle-2:26357,roach-seattle-3:26357 \
-  --locality=region=us-west2,zone=c
+  start \
+   --certs-dir=certs \
+   --store=cockroach-data,ballast-size=0 \
+   --advertise-addr=roach-seattle-3:26357 \
+   --listen-addr=roach-seattle-3:26357 \
+   --http-addr=roach-seattle-3:8080 \
+   --sql-addr=roach-seattle-3:26257 \
+   --join=roach-seattle-1:26357,roach-seattle-2:26357,roach-seattle-3:26357 \
+   --locality=region=us-west2,zone=c
+EOFHERE
+)
+do_stage '' "$TEXT" "$CMD" '$COCKROACHDB_VERSION'
 
-echo
-echo 'Next step: Create the Docker container for HAProxy in Seattle'
-pause
-echo 'Creating the Docker container for HAProxy in Seattle'
-
+TEXT='Next step: Create the Docker container for HAProxy in Seattle'
+CMD=$(cat <<'EOFHERE'
 # Seattle HAProxy
 docker run \
  -d \
@@ -511,72 +771,95 @@ docker run \
  --net=us-west2-net \
  -v ./haproxy_data/us-west2/:/usr/local/etc/haproxy:ro \
  haproxy:$HAPROXY_VERSION  
+EOFHERE
+)
+do_stage '' "$TEXT" "$CMD" '$HAPROXY_VERSION'
 
-echo
-echo 'Next step: Initialize the CockroachDB cluster'
-pause
-echo 'Initializing the CockroachDB cluster'
-
-# Initialize the CockroachDB cluster
-docker exec -it roach-seattle-1 ./cockroach --host=roach-seattle-1:26357 init --certs-dir=certs
+TEXT='Next step: Initialize the CockroachDB cluster'
+CMD=$(cat <<'EOFHERE'
+docker exec -it roach-seattle-1 \
+ ./cockroach --host=roach-seattle-1:26357 init --certs-dir=certs
 
 sleep 3
+EOFHERE
+)
+do_stage '' "$TEXT" "$CMD" noexpand
 
-# Show CockroachDB startup log info for each node
-echo
-echo 'Next step: Show CockroachDB startup log info for each node'
-pause
-echo
+TEXT='Next step: Show CockroachDB startup log info for each node'
+CMD=$(cat <<'EOFHERE'
 echo 'Node 1 startup info:'
-docker exec -it roach-seattle-1 grep 'node starting' /cockroach/cockroach-data/logs/cockroach.log -A 14
+docker exec -it roach-seattle-1 \
+ grep 'node starting' /cockroach/cockroach-data/logs/cockroach.log -A 14
 
 echo
 echo 'Node 2 startup info:'
-docker exec -it roach-seattle-2 grep 'node starting' /cockroach/cockroach-data/logs/cockroach.log -A 14
+docker exec -it roach-seattle-2 \
+ grep 'node starting' /cockroach/cockroach-data/logs/cockroach.log -A 14
 
 echo
 echo 'Node 3 startup info:'
-docker exec -it roach-seattle-3 grep 'node starting' /cockroach/cockroach-data/logs/cockroach.log -A 14
-echo
+docker exec -it roach-seattle-3 \
+ grep 'node starting' /cockroach/cockroach-data/logs/cockroach.log -A 14
+EOFHERE
+) 
+do_stage '' "$TEXT" "$CMD" noexpand
 
-echo 'Initial databases:'
+TEXT='Initial databases:'
+CMD=$(cat <<'EOFHERE'
+docker exec roach-seattle-1 \
+ ./cockroach --host=roach-seattle-1:26257 sql --certs-dir=certs --format table -e \
+  'SHOW DATABASES'
+EOFHERE
+)
+do_stage '' "$TEXT" "$CMD" noexpand
 
-docker exec roach-seattle-1 ./cockroach --host=roach-seattle-1:26257 sql --certs-dir=certs --format table -e 'SHOW DATABASES'
+TEXT='Load DB schema on CockroachDB
 
-echo
-echo 'Load DB schema on CockroachDB'
-echo '(no data, no constraints, no indexes)'
-pause
-
-docker exec \
- roach-seattle-1 \
+(no data, no constraints, no indexes)'
+CMD=$(cat <<'EOFHERE'
+docker exec roach-seattle-1 \
  ./cockroach \
   --host=roach-seattle-1:26257 \
   sql \
   --certs-dir=certs \
   --file /CockroachDB_files/Chinook_CockroachDB_from_MySql_NO_DATA_NO_CONSTRAINTS_NO_INDEXES.sql
+EOFHERE
+)
+do_stage '' "$TEXT" "$CMD" noexpand
 
-echo
-echo 'After loading schema - databases and tables:'
-echo
-docker exec roach-seattle-1 ./cockroach --host=roach-seattle-1:26257 sql --certs-dir=certs --format table -e 'SHOW DATABASES'
-echo
-docker exec roach-seattle-1 ./cockroach --host=roach-seattle-1:26257 sql --certs-dir=certs --database chinook --format table -e 'SHOW TABLES'
+TEXT='After loading schema - databases and tables:'
+CMD=$(cat <<'EOFHERE'
+docker exec roach-seattle-1 \
+ ./cockroach --host=roach-seattle-1:26257 sql --certs-dir=certs --format table -e \
+  'SHOW DATABASES'
+EOFHERE
+)
+do_stage '' "$TEXT" "$CMD" noexpand nopause
 
-echo
-echo 'Prepare to perform the bulk data copy using MOLT Fetch...'
-echo
-echo 'Verify the first binary log has been flushed.'
-echo 'This query should return a result.'
-echo 'At this point, if it does NOT return a result, something is wrong and the subsequent MOLT Fetch command will fail.'
-pause
+CMD=$(cat <<'EOFHERE'
+docker exec roach-seattle-1 \
+ ./cockroach --host=roach-seattle-1:26257 sql --certs-dir=certs --database chinook --format table -e \
+  'SHOW TABLES'
+EOFHERE
+)
+do_stage '' '' "$CMD" noexpand pause_after
 
-docker exec my-mysql-db mysql --password=$MYSQL_ROOT_PASSWORD --table -e 'SELECT @@global.gtid_executed'
+TITLE='Bulk copy using MOLT Fetch'
+TEXT='Prepare to perform the bulk data copy using MOLT Fetch...
 
-echo
-echo 'Perform the bulk data copy using MOLT Fetch in --direct-copy mode'
-pause
+Verify the first binary log has been flushed.
+This query should return a result.
+At this point, if it does NOT return a result, something is wrong and the subsequent MOLT Fetch command will fail.'
+CMD=$(cat <<'EOFHERE'
+docker exec my-mysql-db \
+ mysql --password=$MYSQL_ROOT_PASSWORD --table -e \
+  'SELECT @@global.gtid_executed'
+EOFHERE
+)
+do_stage "$TITLE" "$TEXT" "$CMD" noexpand
 
+TEXT='Perform the bulk data copy using MOLT Fetch in --direct-copy mode'
+CMD=$(cat <<'EOFHERE'
 docker run \
  --name=molt_fetch \
  --hostname=molt_fetch_host \
@@ -585,108 +868,141 @@ docker run \
  -v ./certs_cockroachdb_clients:/app/certs \
  cockroachdb/molt \
   fetch \
-  --logging debug \
-  --mode data-load \
-  --direct-copy \
-  --allow-tls-mode-disable \
-  --source "mysql://root:$MYSQL_ROOT_PASSWORD@mysql_host:3306/Chinook" \
-  --target 'postgres://root@roach-seattle-1:26257/chinook?sslmode=verify-full&sslrootcert=certs%2Fca.crt&sslcert=certs%2Fclient.root.crt&sslkey=certs%2Fclient.root.key' \
+   --logging debug \
+   --mode data-load \
+   --direct-copy \
+   --allow-tls-mode-disable \
+   --source "mysql://root:$MYSQL_ROOT_PASSWORD@mysql_host:3306/Chinook" \
+   --target 'postgres://root@roach-seattle-1:26257/chinook?sslmode=verify-full&sslrootcert=certs%2Fca.crt&sslcert=certs%2Fclient.root.crt&sslkey=certs%2Fclient.root.key' \
 | tee molt_fetch_output.txt
+EOFHERE
+)
+do_stage '' "$TEXT" "$CMD" noexpand
+#TODO specify MOLT version
 
-echo
-echo 'Get the CDC Cursor for later use with MOLT Replicator so we can start streaming'
-echo 'changes from the right point.'
-pause
-
+TEXT='Get the CDC Cursor for later use with MOLT Replicator so we can start streaming changes from the right point.'
+CMD=$(cat <<'EOFHERE'
 CDC_CURSOR=$(grep cdc_cursor molt_fetch_output.txt | head -n 1 | sed 's/.*cdc_cursor":"//' | sed 's/".*//')
 
 echo "CDC Cursor is: $CDC_CURSOR"
+EOFHERE
+)
+do_stage '' "$TEXT" "$CMD" noexpand
+
+TEXT='Show CockroachDB table row counts after bulk copy'
+CMD=$(cat <<'EOFHERE'
+docker exec roach-seattle-1 \
+ ./cockroach --host=roach-seattle-1:26257 sql --certs-dir=certs --database chinook --format table -e \
+  'SELECT count(*) AS album_count_cockroachdb FROM album'
 
 echo
-echo 'Show CockroachDB table row counts after bulk copy'
-pause
 
-docker exec roach-seattle-1 ./cockroach --host=roach-seattle-1:26257 sql --certs-dir=certs --database chinook --format table -e 'SELECT count(*) AS album_count_cockroachdb FROM album'
-echo
-docker exec roach-seattle-1 ./cockroach --host=roach-seattle-1:26257 sql --certs-dir=certs --database chinook --format table -e 'SELECT count(*) AS artist_count_cockroachdb FROM artist'
+docker exec roach-seattle-1 \
+ ./cockroach --host=roach-seattle-1:26257 sql --certs-dir=certs --database chinook --format table -e \
+  'SELECT count(*) AS artist_count_cockroachdb FROM artist'
+EOFHERE
+)
+do_stage '' "$TEXT" "$CMD" noexpand
 
-echo
-echo 'Use MOLT Verify to compare MySQL source data to CockroachDB target data'
-echo '(Note: Any source DB activity between MOLT Fetch and MOLT Verify could produce false differences)'
-pause
+TEXT='Use MOLT Verify to compare MySQL source data to CockroachDB target data
 
+(Note: Any source DB activity between MOLT Fetch and MOLT Verify could produce false differences)'
+CMD=$(cat <<'EOFHERE'
 docker run \
  --name=molt_verify \
  --hostname=molt_verify_host \
  --ip=172.27.0.103 \
  --net=us-west2-net \
  -v ./certs_cockroachdb_clients:/app/certs \
-cockroachdb/molt \
+ cockroachdb/molt \
   verify \
-  --table-filter '[^_].*' \
-  --allow-tls-mode-disable \
-  --source "mysql://root:$MYSQL_ROOT_PASSWORD@mysql_host:3306/Chinook" \
-  --target 'postgres://root@roach-seattle-1:26257/chinook?sslmode=verify-full&sslrootcert=certs%2Fca.crt&sslcert=certs%2Fclient.root.crt&sslkey=certs%2Fclient.root.key' \
+   --table-filter '[^_].*' \
+   --allow-tls-mode-disable \
+   --source "mysql://root:$MYSQL_ROOT_PASSWORD@mysql_host:3306/Chinook" \
+   --target 'postgres://root@roach-seattle-1:26257/chinook?sslmode=verify-full&sslrootcert=certs%2Fca.crt&sslcert=certs%2Fclient.root.crt&sslkey=certs%2Fclient.root.key' \
 | tee molt_verify_output.txt
+EOFHERE
+)
+do_stage '' "$TEXT" "$CMD" noexpand
 
-echo
-echo 'Pretty-print MOLT Verify output'
-pause
-
+TEXT='Pretty-print MOLT Verify output'
+CMD=$(cat <<'EOFHERE'
 cat molt_verify_output.txt | tail -n +2 | jq
+EOFHERE
+)
+do_stage '' "$TEXT" "$CMD" noexpand
 
-echo
-echo 'Generate source database traffic to simulate ongoing operation outside scheduled downtime'
-echo
-echo "Insert $NUM_NEW_ARTISTS_MYSQL new Artists"
-pause
+TEXT="Generate source database traffic to simulate ongoing operation outside scheduled downtime
 
-docker exec my-mysql-db mysql --password=$MYSQL_ROOT_PASSWORD --database=Chinook --table -e \
- "INSERT INTO Artist (ArtistID, Name) (
-    WITH RECURSIVE NumberSeries AS (
-      SELECT 1 AS n
-      UNION ALL
-      SELECT n + 1 FROM NumberSeries WHERE n < $NUM_NEW_ARTISTS_MYSQL
-      ), 
-    cte2 AS (
-      SELECT n, UUID() AS u FROM NumberSeries
-      ), 
-    cte3 AS (
-      SELECT max(ArtistID) AS max_artist FROM Artist
-      ) 
-    SELECT cte2.n + cte3.max_artist AS ArtistID, concat('Artist_', u) AS Name 
-    FROM cte2 JOIN cte3 ON TRUE)"
+Insert $NUM_NEW_ARTISTS_MYSQL new Artists"
+CMD=$(cat <<'EOFHERE'
+docker exec my-mysql-db \
+ mysql --password=$MYSQL_ROOT_PASSWORD --database=Chinook --table -e \
+  "INSERT INTO Artist (ArtistID, Name) (
+     WITH RECURSIVE NumberSeries AS (
+       SELECT 1 AS n
+       UNION ALL
+       SELECT n + 1 FROM NumberSeries WHERE n < $NUM_NEW_ARTISTS_MYSQL
+       ), 
+     cte2 AS (
+       SELECT n, UUID() AS u FROM NumberSeries
+       ), 
+     cte3 AS (
+       SELECT max(ArtistID) AS max_artist FROM Artist
+       ) 
+     SELECT cte2.n + cte3.max_artist AS ArtistID, concat('Artist_', u) AS Name 
+     FROM cte2 JOIN cte3 ON TRUE)"
+EOFHERE
+)
+do_stage '' "$TEXT" "$CMD" '$NUM_NEW_ARTISTS_MYSQL'
 
-echo
-echo "Insert $NUM_NEW_ALBUMS_MYSQL new Albums"
-pause
+TEXT="Insert $NUM_NEW_ALBUMS_MYSQL new Albums"
+CMD=$(cat <<'EOFHERE'
+docker exec my-mysql-db \
+ mysql --password=$MYSQL_ROOT_PASSWORD --database=Chinook --table -e \
+  "INSERT INTO Album (AlbumID, TItle, ArtistID) (
+     WITH RECURSIVE NumberSeries AS (
+       SELECT 1 AS n
+       UNION ALL
+       SELECT n + 1 FROM NumberSeries WHERE n < $NUM_NEW_ALBUMS_MYSQL
+       ), 
+     cte2 AS (
+       SELECT n, UUID() AS u FROM NumberSeries
+       ), 
+     cte3 AS (
+       SELECT max(ArtistID) AS max_artist FROM Artist
+       ), 
+     cte4 AS (
+       SELECT max(AlbumId) AS max_albumid 
+       FROM Album
+       ) 
+     SELECT cte2.n + cte4.max_albumid AS AlbumID, 
+            CONCAT('Title_', u) as Title, 
+            CAST(rand()*(cte3.max_artist-1) AS SIGNED)+1 AS ArtistID
+     FROM cte2 JOIN cte3 ON TRUE JOIN cte4 ON TRUE)"
+EOFHERE
+)
+do_stage '' "$TEXT" "$CMD" '$NUM_NEW_ALBUMS_MYSQL'
 
-docker exec my-mysql-db mysql --password=$MYSQL_ROOT_PASSWORD --database=Chinook --table -e \
- "INSERT INTO Album (AlbumID, TItle, ArtistID) (
-    WITH RECURSIVE NumberSeries AS (
-      SELECT 1 AS n
-      UNION ALL
-      SELECT n + 1 FROM NumberSeries WHERE n < $NUM_NEW_ALBUMS_MYSQL
-      ), 
-    cte2 AS (
-      SELECT n, UUID() AS u FROM NumberSeries
-      ), 
-    cte3 AS (
-      SELECT max(ArtistID) AS max_artist FROM Artist
-      ), 
-    cte4 AS (
-      SELECT max(AlbumId) AS max_albumid 
-      FROM Album
-      ) 
-    SELECT cte2.n + cte4.max_albumid AS AlbumID, 
-           CONCAT('Title_', u) as Title, 
-           CAST(rand()*(cte3.max_artist-1) AS SIGNED)+1 AS ArtistID
-    FROM cte2 JOIN cte3 ON TRUE JOIN cte4 ON TRUE)"
+TEXT='Add constraints and indexes to CockroachDB database schema
 
-echo
-echo 'Set up streaming replication using MOLT Replicator'
-pause
+Note: You could do this either before or after starting streaming replication.
+- Doing it before lets you do it on an otherwise idle CockroachDB cluster.
+  But if that takes a very long time then when you subsequently start
+  MOLT Replicator, it will have more source data to catch up with.
+- Doing it after keeps MOLT Replicator from having as much source data
+  to catch up with.  But these potentially expensive DDL statements
+  will have to happen concurrently with data changes that are being
+  replicated from the source system.'
+CMD=$(cat <<'EOFHERE'
+echo 'TBD'
+EOFHERE
+)
+do_stage '' "$TEXT" "$CMD" noexpand pause_after
 
+TITLE='Streaming replication using MOLT Replicator'
+TEXT='Set up streaming replication'
+CMD=$(cat <<'EOFHERE'
 docker run \
  -d \
  --name=replicator_forward \
@@ -696,64 +1012,82 @@ docker run \
  -v ./certs_cockroachdb_clients:/certs \
  cockroachdb/replicator \
   mylogical \
-  -vv \
-  --defaultGTIDSet $CDC_CURSOR \
-  --stagingSchema _replicator \
-  --stagingCreateSchema \
-  --targetSchema chinook.public \
-  --sourceConn "mysql://root:$MYSQL_ROOT_PASSWORD@mysql_host:3306/Chinook?sslmode=disable" \
-  --targetConn 'postgres://root@roach-seattle-1:26257/chinook?sslmode=verify-full&sslrootcert=certs%2Fca.crt&sslcert=certs%2Fclient.root.crt&sslkey=certs%2Fclient.root.key'
+   -vv \
+   --defaultGTIDSet $CDC_CURSOR \
+   --stagingSchema _replicator \
+   --stagingCreateSchema \
+   --targetSchema chinook.public \
+   --sourceConn "mysql://root:$MYSQL_ROOT_PASSWORD@mysql_host:3306/Chinook?sslmode=disable" \
+   --targetConn 'postgres://root@roach-seattle-1:26257/chinook?sslmode=verify-full&sslrootcert=certs%2Fca.crt&sslcert=certs%2Fclient.root.crt&sslkey=certs%2Fclient.root.key'
 
 sleep 3
+EOFHERE
+)
+do_stage "$TITLE" "$TEXT" "$CMD" '$CDC_CURSOR'
 
-echo
-echo 'View MOLT Replicator log output'
-pause;
-
+TEXT='View MOLT Replicator log output'
+CMD=$(cat <<'EOFHERE'
 docker logs replicator_forward
+EOFHERE
+)
+do_stage '' "$TEXT" "$CMD" noexpand
+
+TEXT='Demonstrate replication
+
+First show the number of artists in MySQL and CockroachDB'
+CMD=$(cat <<'EOFHERE'
+docker exec my-mysql-db \
+ mysql --password=$MYSQL_ROOT_PASSWORD --database=Chinook --table -e \
+  'SELECT count(*) AS artist_count_mysql FROM Artist'
 
 echo
-echo 'Demonstrate replication'
+
+docker exec roach-seattle-1 \
+ cockroach --host=roach-seattle-1:26257 sql --certs-dir=certs --database chinook --format table -e \
+  'SELECT count(*) AS artist_count_cockroachdb FROM artist'
+EOFHERE
+)
+do_stage '' "$TEXT" "$CMD" noexpand
+
+TEXT="Insert $NUM_NEW_ARTISTS_MYSQL2 more artists in MySQL"
+CMD=$(cat <<'EOFHERE'
+docker exec my-mysql-db \
+ mysql --password=$MYSQL_ROOT_PASSWORD --database=Chinook --table -e \
+  "INSERT INTO Artist (ArtistID, Name) (
+     WITH RECURSIVE NumberSeries AS (
+       SELECT 1 AS n
+       UNION ALL
+       SELECT n + 1 FROM NumberSeries WHERE n < $NUM_NEW_ARTISTS_MYSQL2
+       ),
+     cte2 AS (
+       SELECT n, UUID() AS u FROM NumberSeries
+       ),
+     cte3 AS (
+       SELECT max(ArtistID) AS max_artist FROM Artist
+       )
+     SELECT cte2.n + cte3.max_artist AS ArtistID, concat('Artist_', u) AS Name
+     FROM cte2 JOIN cte3 ON TRUE)"
+EOFHERE
+)
+do_stage '' "$TEXT" "$CMD" '$NUM_NEW_ARTISTS_MYSQL2'
+
+TEXT='Again show the number of artists in MySQL and CockroachDB'
+CMD=$(cat <<'EOFHERE'
+docker exec my-mysql-db \
+ mysql --password=$MYSQL_ROOT_PASSWORD --database=Chinook --table -e \
+  'SELECT count(*) AS artist_count_mysql FROM Artist'
+
 echo
-echo First show the number of artists in MySQL and CockroachDB
-pause
 
-docker exec my-mysql-db mysql --password=$MYSQL_ROOT_PASSWORD --database=Chinook --table -e 'SELECT count(*) AS artist_count_mysql FROM Artist'
-echo
-docker exec roach-seattle-1 cockroach --host=roach-seattle-1:26257 sql --certs-dir=certs --database chinook --format table -e 'SELECT count(*) AS artist_count_cockroachdb FROM artist'
+docker exec roach-seattle-1 \
+ cockroach --host=roach-seattle-1:26257 sql --certs-dir=certs --database chinook --format table -e \
+  'SELECT count(*) AS artist_count_cockroachdb FROM artist'
+EOFHERE
+)
+do_stage '' "$TEXT" "$CMD" noexpand
 
-echo
-echo "Insert $NUM_NEW_ARTISTS_MYSQL2 more artists in MySQL"
-pause
-
-docker exec my-mysql-db mysql --password=$MYSQL_ROOT_PASSWORD --database=Chinook --table -e \
- "INSERT INTO Artist (ArtistID, Name) (
-    WITH RECURSIVE NumberSeries AS (
-      SELECT 1 AS n
-      UNION ALL
-      SELECT n + 1 FROM NumberSeries WHERE n < $NUM_NEW_ARTISTS_MYSQL2
-      ),
-    cte2 AS (
-      SELECT n, UUID() AS u FROM NumberSeries
-      ),
-    cte3 AS (
-      SELECT max(ArtistID) AS max_artist FROM Artist
-      )
-    SELECT cte2.n + cte3.max_artist AS ArtistID, concat('Artist_', u) AS Name
-    FROM cte2 JOIN cte3 ON TRUE)"
-
-echo
-echo 'Again show the number of artists in MySQL and CockroachDB'
-pause
-
-docker exec my-mysql-db mysql --password=$MYSQL_ROOT_PASSWORD --database=Chinook --table -e 'SELECT count(*) AS artist_count_mysql FROM Artist'
-echo
-docker exec roach-seattle-1 cockroach --host=roach-seattle-1:26257 sql --certs-dir=certs --database chinook --format table -e 'SELECT count(*) AS artist_count_cockroachdb FROM artist'
-
-echo
-echo 'Now use MOLT Verify again, just on the Artist table'
-pause
-
+TEXT='Now use MOLT Verify again, just on the Artist table'
+CMD=$(cat <<'EOFHERE'
 docker run \
  --name=molt_verify_2 \
  --hostname=molt_verify_host \
@@ -762,26 +1096,27 @@ docker run \
  -v ./certs_cockroachdb_clients:/app/certs \
  cockroachdb/molt \
   verify \
-  --table-filter 'Artist' \
-  --allow-tls-mode-disable \
-  --source "mysql://root:$MYSQL_ROOT_PASSWORD@mysql_host:3306/Chinook" \
-  --target 'postgres://root@roach-seattle-1:26257/chinook?sslmode=verify-full&sslrootcert=certs%2Fca.crt&sslcert=certs%2Fclient.root.crt&sslkey=certs%2Fclient.root.key' \
+   --table-filter 'Artist' \
+   --allow-tls-mode-disable \
+   --source "mysql://root:$MYSQL_ROOT_PASSWORD@mysql_host:3306/Chinook" \
+   --target 'postgres://root@roach-seattle-1:26257/chinook?sslmode=verify-full&sslrootcert=certs%2Fca.crt&sslcert=certs%2Fclient.root.crt&sslkey=certs%2Fclient.root.key' \
 | tail -n +2 | jq
+EOFHERE
+)
+do_stage '' "$TEXT" "$CMD" noexpand
 
-echo
-echo 'Again view MOLT Replicator log output'
-pause
-
+TEXT='Again view MOLT Replicator log output'
+CMD=$(cat <<'EOFHERE'
 docker logs replicator_forward
+EOFHERE
+)
+do_stage '' "$TEXT" "$CMD" noexpand
 
-echo
-echo 'Prepare for scheduled downtime.'
-echo 'Set up reverse replication for failback using MOLT Replicator'
-echo
-echo 'Next step: Generate certificate authority (CA) certificate and private key'
-pause
-echo 'Generating certificate authority (CA) certificate and private key'
+TITLE='Prepare for scheduled downtime'
+TEXT='Set up reverse replication for failback using MOLT Replicator
 
+Next step: Generate certificate authority (CA) certificate and private key'
+CMD=$(cat <<'EOFHERE'
 mkdir certs_replicator_reverse
 mkdir my_safe_directory_replicator_reverse
 
@@ -791,38 +1126,38 @@ docker run \
  -v ./certs_replicator_reverse:/certs_replicator_reverse \
  -v ./my_safe_directory_replicator_reverse:/my_safe_directory_replicator_reverse \
  cockroachdb/cockroach:$COCKROACHDB_VERSION \
- cert create-ca \
-  --certs-dir=/certs_replicator_reverse \
-  --ca-key=/my_safe_directory_replicator_reverse/ca.key
+  cert create-ca \
+   --certs-dir=/certs_replicator_reverse \
+   --ca-key=/my_safe_directory_replicator_reverse/ca.key
 
 echo
 ls -l certs_replicator_reverse my_safe_directory_replicator_reverse
+EOFHERE
+)
+do_stage "$TITLE" "$TEXT" "$CMD" '$COCKROACHDB_VERSION'
 
-# Generate MOLT Replicator webhook TLS/endpoint certificate and private key
-echo
-echo 'Next step: Generate MOLT Replicator webhook TLS/endpoint certificate and private key'
-pause
-echo 'Generating MOLT Replicator webhook TLS/endpoint certificate and private key'
-
+TEXT='Next step: Generate MOLT Replicator webhook TLS/endpoint certificate and private key'
+CMD=$(cat <<'EOFHERE'
 docker run \
  --rm \
  --name temp_crdb \
  -v ./certs_replicator_reverse:/certs_replicator_reverse \
  -v ./my_safe_directory_replicator_reverse:/my_safe_directory_replicator_reverse \
  cockroachdb/cockroach:$COCKROACHDB_VERSION \
- cert create-node \
-  molt_replicator_host \
-  --certs-dir=/certs_replicator_reverse \
-  --ca-key=/my_safe_directory_replicator_reverse/ca.key 
+  cert create-node \
+   molt_replicator_host \
+   --certs-dir=/certs_replicator_reverse \
+   --ca-key=/my_safe_directory_replicator_reverse/ca.key 
 
 echo
 ls -l certs_replicator_reverse my_safe_directory_replicator_reverse
+EOFHERE
+)
+do_stage '' "$TEXT" "$CMD" '$COCKROACHDB_VERSION'
 
-echo
-echo 'Now base64-encode and URL-encode the TLS/endpoint certificate and private key'
-echo 'and the CA certificate for use later in the CREATE CHANGEFEED statement.'
-pause
-
+TEXT='Now base64-encode and URL-encode the TLS/endpoint certificate and private key
+and the CA certificate for use later in the CREATE CHANGEFEED statement.'
+CMD=$(cat <<'EOFHERE'
 NODE_CERT_BASE64_URL_ENCODED=$(base64 -i certs_replicator_reverse/node.crt | jq -R -r '@uri')
 NODE_KEY_BASE64_URL_ENCODED=$(base64 -i certs_replicator_reverse/node.key | jq -R -r '@uri')
 CA_CERT_BASE64_URL_ENCODED=$(base64 -i certs_replicator_reverse/ca.crt | jq -R -r '@uri')
@@ -839,44 +1174,44 @@ echo
 echo 'TLS/endpoint key base64-encoded and URL-encoded:'
 echo
 echo $CA_CERT_BASE64_URL_ENCODED
+EOFHERE
+)
+do_stage '' "$TEXT" "$CMD" noexpand
 
-echo
-echo 'Enable rangefeeds for change data capture for reverse migration'
-pause
+TEXT='Enable rangefeeds for change data capture for reverse migration'
+CMD=$(cat <<'EOFHERE'
+docker exec roach-seattle-1 \
+ cockroach --host=roach-seattle-1:26257 sql --certs-dir=certs --database chinook --format table -e \
+  'SET CLUSTER SETTING kv.rangefeed.enabled = true'
+EOFHERE
+)
+do_stage '' "$TEXT" "$CMD" noexpand
 
-docker exec roach-seattle-1 cockroach --host=roach-seattle-1:26257 sql --certs-dir=certs --database chinook --format table -e 'SET CLUSTER SETTING kv.rangefeed.enabled = true'
+TITLE='-- START DOWNTIME --'
+TEXT='Stop MySQL application traffic.
 
-echo
-echo '-- START DOWNTIME --'
-echo
-echo 'Stop MySQL application traffic.'
-echo 'Wait for replication pipeline to drain.'
-echo 'Wait at least as long as the MOLT Replicator --flushPeriod setting if specified,'
-echo 'or at least 30 seconds if not specified.'
-pause
+Wait for replication pipeline to drain.
+Wait at least as long as the MOLT Replicator --flushPeriod setting if specified,
+or at least 30 seconds if not specified.
 
-echo
-echo 'Check that replication pipeline has drained'
-echo
-echo 'Look at "upserted rows" lines in the MOLT Replicator log output'
-pause
+Check that replication pipeline has drained
 
+Look at "upserted rows" lines in the MOLT Replicator log output'
+CMD=$(cat <<'EOFHERE'
 docker logs replicator_forward 2>&1 | grep 'upserted rows'
+EOFHERE
+)
+do_stage "$TITLE" "$TEXT" "$CMD" noexpand
 
-echo
-echo 'Stop MOLT Replicator forward migration'
-pause
-
+TEXT='Stop MOLT Replicator forward migration'
+CMD=$(cat <<'EOFHERE'
 docker stop replicator_forward
+EOFHERE
+)
+do_stage '' "$TEXT" "$CMD" noexpand
 
-echo
-echo 'Add constraints and indexes to CockroachDB database schema'
-pause
-
-echo
-echo 'Start MOLT Replicator for the reverse migration'
-pause
-
+TEXT='Start MOLT Replicator for the reverse migration'
+CMD=$(cat <<'EOFHERE'
 docker run \
  -d \
  --name=replicator_reverse \
@@ -888,124 +1223,153 @@ docker run \
  -v ./certs_replicator_reverse:/certs_replicator_reverse \
  cockroachdb/replicator \
   start \
-  -v \
-  --stagingSchema _replicator \
-  --bindAddr :30004 \
-  --metricsAddr :30005 \
-  --disableAuthentication \
-  --targetConn "mysql://root:$MYSQL_ROOT_PASSWORD@mysql_host:3306/Chinook?sslmode=disable" \
-  --stagingConn 'postgres://root@roach-seattle-1:26257/chinook?sslmode=verify-full&sslrootcert=certs_crdb%2Fca.crt&sslcert=certs_crdb%2Fclient.root.crt&sslkey=certs_crdb%2Fclient.root.key' \
-  --tlsCertificate /certs_replicator_reverse/node.crt \
-  --tlsPrivateKey /certs_replicator_reverse/node.key
+   -v \
+   --stagingSchema _replicator \
+   --bindAddr :30004 \
+   --metricsAddr :30005 \
+   --disableAuthentication \
+   --targetConn "mysql://root:$MYSQL_ROOT_PASSWORD@mysql_host:3306/Chinook?sslmode=disable" \
+   --stagingConn 'postgres://root@roach-seattle-1:26257/chinook?sslmode=verify-full&sslrootcert=certs_crdb%2Fca.crt&sslcert=certs_crdb%2Fclient.root.crt&sslkey=certs_crdb%2Fclient.root.key' \
+   --tlsCertificate /certs_replicator_reverse/node.crt \
+   --tlsPrivateKey /certs_replicator_reverse/node.key
+EOFHERE
+)
+do_stage '' "$TEXT" "$CMD" noexpand
 
-echo
-echo 'Look at MOLT Replicator logs'
-pause
-
+TEXT='Look at MOLT Replicator logs'
+CMD=$(cat <<'EOFHERE'
 docker logs replicator_reverse
+EOFHERE
+)
+do_stage '' "$TEXT" "$CMD" noexpand
 
-echo
-echo 'Get the CockroachCB cluster logical timestamp for the changefeed cursor parameter'
-pause
-
+TEXT='Get the CockroachCB cluster logical timestamp for the changefeed cursor parameter'
+CMD=$(cat <<'EOFHERE'
 CLUSTER_LOGICAL_TIMESTAMP=$(docker exec roach-seattle-1 cockroach --host=roach-seattle-1:26257 sql --certs-dir=certs --database chinook --format csv -e 'SELECT cluster_logical_timestamp()' | tail -n -1)
 
-echo
 echo "Cluster logical timestamp: $CLUSTER_LOGICAL_TIMESTAMP"
+EOFHERE
+)
+do_stage '' "$TEXT" "$CMD" noexpand
 
-echo
-echo 'Create changefeed to MOLT Replicator'
-pause
+TEXT='Create changefeed to MOLT Replicator'
+CMD=$(cat <<'EOFHERE'
+docker exec roach-seattle-1 \
+ cockroach --host=roach-seattle-1:26257 sql --certs-dir=certs --database chinook --format table -e \
+  "CREATE CHANGEFEED FOR TABLE album, artist, customer, employee, genre, invoice, invoiceline, mediatype, playlist, playlisttrack, track
+   INTO 'webhook-https://molt_replicator_host:30004/Chinook?client_cert=$NODE_CERT_BASE64_URL_ENCODED&client_key=$NODE_KEY_BASE64_URL_ENCODED&ca_cert=$CA_CERT_BASE64_URL_ENCODED' 
+   WITH updated, 
+        resolved = '250ms', 
+        min_checkpoint_frequency = '250ms', 
+        initial_scan = 'no', 
+        cursor = '$CLUSTER_LOGICAL_TIMESTAMP', 
+        webhook_sink_config = '{\"Flush\":{\"Bytes\":1048576,\"Frequency\":\"1s\"}}'"
+EOFHERE
+)
+do_stage '' "$TEXT" "$CMD" noexpand
 
-docker exec roach-seattle-1 cockroach --host=roach-seattle-1:26257 sql --certs-dir=certs --database chinook --format table -e \
-"CREATE CHANGEFEED FOR TABLE album, artist, customer, employee, genre, invoice, invoiceline, mediatype, playlist, playlisttrack, track
- INTO 'webhook-https://molt_replicator_host:30004/Chinook?client_cert=$NODE_CERT_BASE64_URL_ENCODED&client_key=$NODE_KEY_BASE64_URL_ENCODED&ca_cert=$CA_CERT_BASE64_URL_ENCODED' 
- WITH updated, 
-      resolved = '250ms', 
-      min_checkpoint_frequency = '250ms', 
-      initial_scan = 'no', 
-      cursor = '$CLUSTER_LOGICAL_TIMESTAMP', 
-      webhook_sink_config = '{\"Flush\":{\"Bytes\":1048576,\"Frequency\":\"1s\"}}'"
+TEXT='Reverse replication is set up
 
-echo
-echo 'Reverse replication is set up'
-pause
-
-echo
-echo 'Show the changefeed job'
-pause
-
-docker exec roach-seattle-1 cockroach --host=roach-seattle-1:26257 sql --certs-dir=certs --database chinook --format records -e 'SHOW CHANGEFEED JOBS'
+Show the changefeed job'
+CMD=$(cat <<'EOFHERE'
+docker exec roach-seattle-1 \
+ cockroach --host=roach-seattle-1:26257 sql --certs-dir=certs --database chinook --format records \
+  -e 'SHOW CHANGEFEED JOBS'
+EOFHERE
+)
+do_stage '' "$TEXT" "$CMD" noexpand
 
 echo
 echo 'Switch application to start using CockroachDB'
 echo 'Validate application'
 echo 'Perform final go-no-go tests'
-pause
-
-echo '-- END DOWNTIME --'
 echo
-echo 'Migration is complete.'
-pause
 
-echo
-echo 'Show reverse replication is working'
-echo
-echo 'First show the number of playlists in MySQL and CockroachDB'
+TITLE='-- END DOWNTIME --'
+TEXT='Migration is complete.
 
-docker exec my-mysql-db mysql --password=$MYSQL_ROOT_PASSWORD --database=Chinook --table -e 'SELECT count(*) AS playlist_count_mysql FROM Playlist'
+Show reverse replication is working
+
+First show the number of playlists in MySQL and CockroachDB'
+CMD=$(cat <<'EOFHERE'
+docker exec my-mysql-db \
+ mysql --password=$MYSQL_ROOT_PASSWORD --database=Chinook --table -e \
+  'SELECT count(*) AS playlist_count_mysql FROM Playlist'
+
 echo  
-docker exec roach-seattle-1 cockroach --host=roach-seattle-1:26257 sql --certs-dir=certs --database chinook --format table -e 'SELECT count(*) AS playlist_count_cockroachdb FROM playlist'
 
-echo
-echo 'Insert a new playlist on CockroachDB'
-pause
+docker exec roach-seattle-1 \
+ cockroach --host=roach-seattle-1:26257 sql --certs-dir=certs --database chinook --format table -e \
+  'SELECT count(*) AS playlist_count_cockroachdb FROM playlist'
+EOFHERE
+)
+do_stage "$TITLE" "$TEXT" "$CMD" noexpand
 
-docker exec roach-seattle-1 cockroach --host=roach-seattle-1:26257 sql --certs-dir=certs --database chinook --format table -e \
-"INSERT INTO PLAYLIST (playlistid, name) (
-  WITH cte AS (
-   SELECT max(playlistid) AS max_playlistid FROM playlist)
-  SELECT cte.max_playlistid + 1 AS playlistid, 'AI-Generated Favorites' AS name
-  FROM cte
-)"
+TEXT='Insert a new playlist on CockroachDB'
+CMD=$(cat <<'EOFHERE'
+docker exec roach-seattle-1 \
+ cockroach --host=roach-seattle-1:26257 sql --certs-dir=certs --database chinook --format table -e \
+  "INSERT INTO PLAYLIST (playlistid, name) (
+    WITH cte AS (
+     SELECT max(playlistid) AS max_playlistid FROM playlist)
+    SELECT cte.max_playlistid + 1 AS playlistid, 'AI-Generated Favorites' AS name
+    FROM cte
+   )"
 
-echo
 echo "Sleep $REVERSE_REPLICATION_LATENCY_SLEEP seconds to let the change propagate to MySQL"
 sleep $REVERSE_REPLICATION_LATENCY_SLEEP
+EOFHERE
+)
+do_stage '' "$TEXT" "$CMD" noexpand
+
+TEXT='Again show the number of playlists in MySQL and CockroachDB'
+CMD=$(cat <<'EOFHERE'
+docker exec my-mysql-db \
+ mysql --password=$MYSQL_ROOT_PASSWORD --database=Chinook --table -e \
+  'SELECT count(*) AS playlist_count_mysql FROM Playlist'
 
 echo
-echo 'Again show the number of playlists in MySQL and CockroachDB'
 
-docker exec my-mysql-db mysql --password=$MYSQL_ROOT_PASSWORD --database=Chinook --table -e 'SELECT count(*) AS playlist_count_mysql FROM Playlist'
-echo
-docker exec roach-seattle-1 cockroach --host=roach-seattle-1:26257 sql --certs-dir=certs --database chinook --format table -e 'SELECT count(*) AS playlist_count_cockroachdb FROM playlist'
+docker exec roach-seattle-1 \
+ cockroach --host=roach-seattle-1:26257 sql --certs-dir=certs --database chinook --format table -e \
+  'SELECT count(*) AS playlist_count_cockroachdb FROM playlist'
+EOFHERE
+)
+do_stage '' "$TEXT" "$CMD" noexpand
 
-echo
-echo 'Look at MOLT Replicator logs again'
-pause
-
+TEXT='Look at MOLT Replicator logs again'
+CMD=$(cat <<'EOFHERE'
 docker logs replicator_reverse
+EOFHERE
+)
+do_stage '' "$TEXT" "$CMD" noexpand
 
-echo
-echo 'After using CockroachDB long enough, when the customer is satisfied with the migration,'
-echo 'shut down reverse migration and shut down the original MySQL server'
-pause
+TITLE='Decommission'
+TEXT='After using CockroachDB long enough, when the customer is satisfied with the migration,
+shut down reverse migration and shut down the original MySQL server
 
-echo
-echo 'Stop the changefeed for MOLT Replicator for the reverse replication'
-pause
+Stop the changefeed for MOLT Replicator for the reverse replication'
+CMD=$(cat <<'EOFHERE'
+docker exec roach-seattle-1 \
+ cockroach --host=roach-seattle-1:26257 sql --certs-dir=certs --database chinook --format records -e \
+  "CANCEL JOB (SELECT job_ID FROM [SHOW CHANGEFEED JOBS] WHERE status='running' ORDER BY created DESC LIMIT 1)"
+EOFHERE
+)
+do_stage "$TITLE" "$TEXT" "$CMD" noexpand
 
-docker exec roach-seattle-1 cockroach --host=roach-seattle-1:26257 sql --certs-dir=certs --database chinook --format records -e "CANCEL JOB (SELECT job_ID FROM [SHOW CHANGEFEED JOBS] WHERE status='running' ORDER BY created DESC LIMIT 1)"
-
-echo
-echo 'Stop MOLT Replicator reverse migration'
-
+TEXT='Stop MOLT Replicator reverse migration'
+CMD=$(cat <<'EOFHERE'
 docker stop replicator_reverse
+EOFHERE
+)
+do_stage '' "$TEXT" "$CMD" noexpand
 
-echo
-echo 'Stop MySQL'
-
+TEXT='Stop MySQL'
+CMD=$(cat <<'EOFHERE'
 docker stop my-mysql-db
+EOFHERE
+)
+do_stage '' "$TEXT" "$CMD" noexpand
 
 echo
 echo '-- End of script --'
