@@ -1,0 +1,19 @@
+# Generated certificate directories
+certs_cockroachdb_ca/
+certs_cockroachdb_1/
+certs_cockroachdb_2/
+certs_cockroachdb_3/
+certs_cockroachdb_clients/
+certs_replicator_reverse/
+my_safe_directory_cockroachdb/
+my_safe_directory_replicator_reverse/
+
+# CockroachDB data directories
+roach-seattle-*-data/
+
+# HAProxy generated config
+haproxy_data/
+
+# MOLT output files
+molt_fetch_output.txt
+molt_verify_output.txt
