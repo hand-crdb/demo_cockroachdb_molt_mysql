@@ -1,25 +1,26 @@
-#!/bin/zsh
+#!/bin/bash
 
 # Set options for better shell script behavior
 # Per https://gist.github.com/mohanpedala/1e2ff5661761d3abd0385e8223e16425
 #
-# The set -e option instructs bash to immediately exit 
+# The set -e option instructs bash to immediately exit
 # if any command has a non-zero exit status.
 #
-# When -u is set, a reference to any variable you haven't previously 
-# defined - with the exceptions of $* and $@ - is an error, and causes 
+# When -u is set, a reference to any variable you haven't previously
+# defined - with the exceptions of $* and $@ - is an error, and causes
 # the program to immediately exit.
 #
-# The -o pipefail setting prevents errors in a pipeline from being masked. 
-# If any command in a pipeline fails, that return code will be used as 
-# the return code of the whole pipeline. 
+# The -o pipefail setting prevents errors in a pipeline from being masked.
+# If any command in a pipeline fails, that return code will be used as
+# the return code of the whole pipeline.
 set -euo pipefail
 
 # Uncomment to turn on shell tracing
 # set -x
 
-# Vaariable definitions
-# NOTE: You must expoert Variables that will be displayed expanded in displayed commands
+# Variable definitions
+# NOTE: You must export variables that will be displayed expanded in displayed commands
+# WARNING: Credentials below are for local demo only. Use a secrets manager in production.
 
 # Docker container versions (can specify "latest" too)
 export MYSQL_VERSION='8.4.6'
@@ -37,12 +38,61 @@ export CDC_CURSOR=''
 TEXT_WIDTH="100"
 STAGE=1
 TOTALSTAGES="9"
+NOPAUSE=0
+RESET=0
 
-if [[ "${1:-}" == "--nopause" ]]; then
-  NOPAUSE=1
-  else
-  NOPAUSE=0
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --nopause|-n)
+            NOPAUSE=1
+            shift
+            ;;
+        --reset|-r)
+            RESET=1
+            shift
+            ;;
+        *)
+            echo "Error: Unknown option $1" >&2
+            echo "Usage: $0 [--nopause|-n] [--reset|-r]" >&2
+            exit 1
+            ;;
+    esac
+done
+
+# ========================
+# --reset option: tear down all containers, networks, and generated files
+# ========================
+if [[ $RESET == "1" ]]; then
+  echo "Resetting environment..."
+
+  echo "Stopping and removing containers..."
+  docker rm -f my-mysql-db 2>/dev/null || true
+  docker rm -f roach-seattle-1 roach-seattle-2 roach-seattle-3 2>/dev/null || true
+  docker rm -f haproxy-seattle 2>/dev/null || true
+  docker rm -f replicator_forward replicator_reverse 2>/dev/null || true
+  docker rm -f molt_fetch molt_verify molt_verify_2 2>/dev/null || true
+  docker network rm us-west2-net 2>/dev/null || true
+
+  echo "Removing generated files and directories..."
+  rm -rf certs_cockroachdb_ca certs_cockroachdb_1 certs_cockroachdb_2 certs_cockroachdb_3
+  rm -rf certs_cockroachdb_clients certs_replicator_reverse
+  rm -rf my_safe_directory_cockroachdb my_safe_directory_replicator_reverse
+  rm -rf roach-seattle-1-data roach-seattle-2-data roach-seattle-3-data
+  rm -rf haproxy_data
+  rm -f molt_fetch_output.txt molt_verify_output.txt
+
+  echo "Environment fully reset."
+  exit 0
 fi
+
+# Cross-platform base64 encode (macOS uses -i, GNU uses positional arg)
+b64_encode() {
+  if [[ "$(uname)" == "Darwin" ]]; then
+    base64 -i "$1"
+  else
+    base64 -w0 "$1"
+  fi
+}
 
 pause() {
   PAUSE_TEXT="⏸️   Press [Enter] to execute this step..."
@@ -53,8 +103,7 @@ pause() {
   if [[ $NOPAUSE == "1" ]]; then
       sleep 1
     else
-#USE THIS FOR BASH NOT KSH#      read -p "${PAUSE_TEXT}" 
-      read "?${PAUSE_TEXT}" 
+      read -p "${PAUSE_TEXT}"
   fi
   echo
 }
@@ -117,7 +166,10 @@ do_stage() {
         pause
     fi
     echo "---Running"
-    eval "$3" 
+    # Note: eval is required because CMD strings reference shell functions and variables
+    # from this script. Variables set inside eval (e.g. CDC_CURSOR, CLUSTER_LOGICAL_TIMESTAMP)
+    # persist in the current shell and are available to subsequent stages.
+    eval "$3"
     echo "---Done"
     echo
     if [[ $# -ne 5 ]]; then
@@ -506,6 +558,15 @@ EOFHERE
 )
 do_stage '' "$TEXT" "$CMD" noexpand
 
+TEXT='Drop the temporary database used for synthetic write traffic'
+CMD=$(cat <<'EOFHERE'
+docker exec my-mysql-db \
+ mysql --password=$MYSQL_ROOT_PASSWORD -e \
+  'DROP DATABASE IF EXISTS temp_delete'
+EOFHERE
+)
+do_stage '' "$TEXT" "$CMD" noexpand nopause
+
 TITLE='Setting up CockroachDB...'
 
 # Set up CockroachDB
@@ -570,7 +631,7 @@ do_stage '' "$TEXT" "$CMD" noexpand
 TEXT='Next step: Generate Cockroachdb node 1 certificate and private key'
 CMD=$(cat <<'EOFHERE'
 mkdir certs_cockroachdb_1
-cp -i certs_cockroachdb_ca/ca.crt certs_cockroachdb_1
+cp certs_cockroachdb_ca/ca.crt certs_cockroachdb_1
 
 docker run \
  --rm \
@@ -592,7 +653,7 @@ do_stage '' "$TEXT" "$CMD" '$COCKROACHDB_VERSION'
 TEXT='Next step: Generate Cockroachdb node 2 certificate and private key'
 CMD=$(cat <<'EOFHERE'
 mkdir certs_cockroachdb_2
-cp -i certs_cockroachdb_ca/ca.crt certs_cockroachdb_2
+cp certs_cockroachdb_ca/ca.crt certs_cockroachdb_2
 
 docker run \
  --rm \
@@ -614,7 +675,7 @@ do_stage '' "$TEXT" "$CMD" '$COCKROACHDB_VERSION'
 TEXT='Next step: Generate Cockroachdb node 3 certificate and private key'
 CMD=$(cat <<'EOFHERE'
 mkdir certs_cockroachdb_3
-cp -i certs_cockroachdb_ca/ca.crt certs_cockroachdb_3
+cp certs_cockroachdb_ca/ca.crt certs_cockroachdb_3
 
 docker run \
  --rm \
@@ -636,7 +697,7 @@ do_stage '' "$TEXT" "$CMD" '$COCKROACHDB_VERSION'
 TEXT='Next step: Generate root client certificate and private key'
 CMD=$(cat <<'EOFHERE'
 mkdir certs_cockroachdb_clients
-cp -i certs_cockroachdb_ca/ca.crt certs_cockroachdb_clients
+cp certs_cockroachdb_ca/ca.crt certs_cockroachdb_clients
 
 docker run \
  --rm \
@@ -649,12 +710,12 @@ docker run \
    --certs-dir=/certs_cockroachdb_clients \
    --ca-key=/my_safe_directory_cockroachdb/ca.key
 
-cp -i certs_cockroachdb_clients/client.root.crt certs_cockroachdb_1
-cp -i certs_cockroachdb_clients/client.root.key certs_cockroachdb_1
-cp -i certs_cockroachdb_clients/client.root.crt certs_cockroachdb_2
-cp -i certs_cockroachdb_clients/client.root.key certs_cockroachdb_2
-cp -i certs_cockroachdb_clients/client.root.crt certs_cockroachdb_3
-cp -i certs_cockroachdb_clients/client.root.key certs_cockroachdb_3
+cp certs_cockroachdb_clients/client.root.crt certs_cockroachdb_1
+cp certs_cockroachdb_clients/client.root.key certs_cockroachdb_1
+cp certs_cockroachdb_clients/client.root.crt certs_cockroachdb_2
+cp certs_cockroachdb_clients/client.root.key certs_cockroachdb_2
+cp certs_cockroachdb_clients/client.root.crt certs_cockroachdb_3
+cp certs_cockroachdb_clients/client.root.key certs_cockroachdb_3
 
 echo
 ls -l certs_cockroachdb_clients certs_cockroachdb_1 certs_cockroachdb_2 certs_cockroachdb_3 my_safe_directory_cockroachdb
@@ -777,7 +838,7 @@ do_stage '' "$TEXT" "$CMD" '$HAPROXY_VERSION'
 
 TEXT='Next step: Initialize the CockroachDB cluster'
 CMD=$(cat <<'EOFHERE'
-docker exec -it roach-seattle-1 \
+docker exec -i roach-seattle-1 \
  ./cockroach --host=roach-seattle-1:26357 init --certs-dir=certs
 
 sleep 3
@@ -788,17 +849,17 @@ do_stage '' "$TEXT" "$CMD" noexpand
 TEXT='Next step: Show CockroachDB startup log info for each node'
 CMD=$(cat <<'EOFHERE'
 echo 'Node 1 startup info:'
-docker exec -it roach-seattle-1 \
+docker exec -i roach-seattle-1 \
  grep 'node starting' /cockroach/cockroach-data/logs/cockroach.log -A 14
 
 echo
 echo 'Node 2 startup info:'
-docker exec -it roach-seattle-2 \
+docker exec -i roach-seattle-2 \
  grep 'node starting' /cockroach/cockroach-data/logs/cockroach.log -A 14
 
 echo
 echo 'Node 3 startup info:'
-docker exec -it roach-seattle-3 \
+docker exec -i roach-seattle-3 \
  grep 'node starting' /cockroach/cockroach-data/logs/cockroach.log -A 14
 EOFHERE
 ) 
@@ -861,6 +922,7 @@ do_stage "$TITLE" "$TEXT" "$CMD" noexpand
 TEXT='Perform the bulk data copy using MOLT Fetch in --direct-copy mode'
 CMD=$(cat <<'EOFHERE'
 docker run \
+ --rm \
  --name=molt_fetch \
  --hostname=molt_fetch_host \
  --ip=172.27.0.102 \
@@ -882,7 +944,7 @@ do_stage '' "$TEXT" "$CMD" noexpand
 
 TEXT='Get the CDC Cursor for later use with MOLT Replicator so we can start streaming changes from the right point.'
 CMD=$(cat <<'EOFHERE'
-CDC_CURSOR=$(grep cdc_cursor molt_fetch_output.txt | head -n 1 | sed 's/.*cdc_cursor":"//' | sed 's/".*//')
+CDC_CURSOR=$(grep cdc_cursor molt_fetch_output.txt | head -n 1 | jq -r '.cdc_cursor // empty' 2>/dev/null || grep cdc_cursor molt_fetch_output.txt | head -n 1 | sed 's/.*cdc_cursor":"//' | sed 's/".*//')
 
 echo "CDC Cursor is: $CDC_CURSOR"
 EOFHERE
@@ -909,6 +971,7 @@ TEXT='Use MOLT Verify to compare MySQL source data to CockroachDB target data
 (Note: Any source DB activity between MOLT Fetch and MOLT Verify could produce false differences)'
 CMD=$(cat <<'EOFHERE'
 docker run \
+ --rm \
  --name=molt_verify \
  --hostname=molt_verify_host \
  --ip=172.27.0.103 \
@@ -1043,7 +1106,7 @@ docker exec my-mysql-db \
 echo
 
 docker exec roach-seattle-1 \
- cockroach --host=roach-seattle-1:26257 sql --certs-dir=certs --database chinook --format table -e \
+ ./cockroach --host=roach-seattle-1:26257 sql --certs-dir=certs --database chinook --format table -e \
   'SELECT count(*) AS artist_count_cockroachdb FROM artist'
 EOFHERE
 )
@@ -1080,7 +1143,7 @@ docker exec my-mysql-db \
 echo
 
 docker exec roach-seattle-1 \
- cockroach --host=roach-seattle-1:26257 sql --certs-dir=certs --database chinook --format table -e \
+ ./cockroach --host=roach-seattle-1:26257 sql --certs-dir=certs --database chinook --format table -e \
   'SELECT count(*) AS artist_count_cockroachdb FROM artist'
 EOFHERE
 )
@@ -1089,6 +1152,7 @@ do_stage '' "$TEXT" "$CMD" noexpand
 TEXT='Now use MOLT Verify again, just on the Artist table'
 CMD=$(cat <<'EOFHERE'
 docker run \
+ --rm \
  --name=molt_verify_2 \
  --hostname=molt_verify_host \
  --ip=172.27.0.103 \
@@ -1158,9 +1222,9 @@ do_stage '' "$TEXT" "$CMD" '$COCKROACHDB_VERSION'
 TEXT='Now base64-encode and URL-encode the TLS/endpoint certificate and private key
 and the CA certificate for use later in the CREATE CHANGEFEED statement.'
 CMD=$(cat <<'EOFHERE'
-NODE_CERT_BASE64_URL_ENCODED=$(base64 -i certs_replicator_reverse/node.crt | jq -R -r '@uri')
-NODE_KEY_BASE64_URL_ENCODED=$(base64 -i certs_replicator_reverse/node.key | jq -R -r '@uri')
-CA_CERT_BASE64_URL_ENCODED=$(base64 -i certs_replicator_reverse/ca.crt | jq -R -r '@uri')
+NODE_CERT_BASE64_URL_ENCODED=$(b64_encode certs_replicator_reverse/node.crt | jq -R -r '@uri')
+NODE_KEY_BASE64_URL_ENCODED=$(b64_encode certs_replicator_reverse/node.key | jq -R -r '@uri')
+CA_CERT_BASE64_URL_ENCODED=$(b64_encode certs_replicator_reverse/ca.crt | jq -R -r '@uri')
 
 echo
 echo 'TLS/endpoint certificate base64-encoded and URL-encoded:'
@@ -1171,7 +1235,7 @@ echo 'TLS/endpoint key base64-encoded and URL-encoded:'
 echo
 echo $NODE_KEY_BASE64_URL_ENCODED
 echo
-echo 'TLS/endpoint key base64-encoded and URL-encoded:'
+echo 'CA certificate base64-encoded and URL-encoded:'
 echo
 echo $CA_CERT_BASE64_URL_ENCODED
 EOFHERE
@@ -1181,7 +1245,7 @@ do_stage '' "$TEXT" "$CMD" noexpand
 TEXT='Enable rangefeeds for change data capture for reverse migration'
 CMD=$(cat <<'EOFHERE'
 docker exec roach-seattle-1 \
- cockroach --host=roach-seattle-1:26257 sql --certs-dir=certs --database chinook --format table -e \
+ ./cockroach --host=roach-seattle-1:26257 sql --certs-dir=certs --database chinook --format table -e \
   'SET CLUSTER SETTING kv.rangefeed.enabled = true'
 EOFHERE
 )
@@ -1210,6 +1274,8 @@ EOFHERE
 )
 do_stage '' "$TEXT" "$CMD" noexpand
 
+# NOTE: --disableAuthentication is used for this local demo only.
+# In production, use JWT or TLS client cert authentication.
 TEXT='Start MOLT Replicator for the reverse migration'
 CMD=$(cat <<'EOFHERE'
 docker run \
@@ -1245,7 +1311,7 @@ do_stage '' "$TEXT" "$CMD" noexpand
 
 TEXT='Get the CockroachCB cluster logical timestamp for the changefeed cursor parameter'
 CMD=$(cat <<'EOFHERE'
-CLUSTER_LOGICAL_TIMESTAMP=$(docker exec roach-seattle-1 cockroach --host=roach-seattle-1:26257 sql --certs-dir=certs --database chinook --format csv -e 'SELECT cluster_logical_timestamp()' | tail -n -1)
+CLUSTER_LOGICAL_TIMESTAMP=$(docker exec roach-seattle-1 ./cockroach --host=roach-seattle-1:26257 sql --certs-dir=certs --database chinook --format csv -e 'SELECT cluster_logical_timestamp()' | tail -n -1)
 
 echo "Cluster logical timestamp: $CLUSTER_LOGICAL_TIMESTAMP"
 EOFHERE
@@ -1255,7 +1321,7 @@ do_stage '' "$TEXT" "$CMD" noexpand
 TEXT='Create changefeed to MOLT Replicator'
 CMD=$(cat <<'EOFHERE'
 docker exec roach-seattle-1 \
- cockroach --host=roach-seattle-1:26257 sql --certs-dir=certs --database chinook --format table -e \
+ ./cockroach --host=roach-seattle-1:26257 sql --certs-dir=certs --database chinook --format table -e \
   "CREATE CHANGEFEED FOR TABLE album, artist, customer, employee, genre, invoice, invoiceline, mediatype, playlist, playlisttrack, track
    INTO 'webhook-https://molt_replicator_host:30004/Chinook?client_cert=$NODE_CERT_BASE64_URL_ENCODED&client_key=$NODE_KEY_BASE64_URL_ENCODED&ca_cert=$CA_CERT_BASE64_URL_ENCODED' 
    WITH updated, 
@@ -1273,7 +1339,7 @@ TEXT='Reverse replication is set up
 Show the changefeed job'
 CMD=$(cat <<'EOFHERE'
 docker exec roach-seattle-1 \
- cockroach --host=roach-seattle-1:26257 sql --certs-dir=certs --database chinook --format records \
+ ./cockroach --host=roach-seattle-1:26257 sql --certs-dir=certs --database chinook --format records \
   -e 'SHOW CHANGEFEED JOBS'
 EOFHERE
 )
@@ -1299,7 +1365,7 @@ docker exec my-mysql-db \
 echo  
 
 docker exec roach-seattle-1 \
- cockroach --host=roach-seattle-1:26257 sql --certs-dir=certs --database chinook --format table -e \
+ ./cockroach --host=roach-seattle-1:26257 sql --certs-dir=certs --database chinook --format table -e \
   'SELECT count(*) AS playlist_count_cockroachdb FROM playlist'
 EOFHERE
 )
@@ -1308,7 +1374,7 @@ do_stage "$TITLE" "$TEXT" "$CMD" noexpand
 TEXT='Insert a new playlist on CockroachDB'
 CMD=$(cat <<'EOFHERE'
 docker exec roach-seattle-1 \
- cockroach --host=roach-seattle-1:26257 sql --certs-dir=certs --database chinook --format table -e \
+ ./cockroach --host=roach-seattle-1:26257 sql --certs-dir=certs --database chinook --format table -e \
   "INSERT INTO PLAYLIST (playlistid, name) (
     WITH cte AS (
      SELECT max(playlistid) AS max_playlistid FROM playlist)
@@ -1331,7 +1397,7 @@ docker exec my-mysql-db \
 echo
 
 docker exec roach-seattle-1 \
- cockroach --host=roach-seattle-1:26257 sql --certs-dir=certs --database chinook --format table -e \
+ ./cockroach --host=roach-seattle-1:26257 sql --certs-dir=certs --database chinook --format table -e \
   'SELECT count(*) AS playlist_count_cockroachdb FROM playlist'
 EOFHERE
 )
@@ -1351,7 +1417,7 @@ shut down reverse migration and shut down the original MySQL server
 Stop the changefeed for MOLT Replicator for the reverse replication'
 CMD=$(cat <<'EOFHERE'
 docker exec roach-seattle-1 \
- cockroach --host=roach-seattle-1:26257 sql --certs-dir=certs --database chinook --format records -e \
+ ./cockroach --host=roach-seattle-1:26257 sql --certs-dir=certs --database chinook --format records -e \
   "CANCEL JOB (SELECT job_ID FROM [SHOW CHANGEFEED JOBS] WHERE status='running' ORDER BY created DESC LIMIT 1)"
 EOFHERE
 )
