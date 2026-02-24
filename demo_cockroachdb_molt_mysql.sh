@@ -1,5 +1,17 @@
 #!/bin/zsh
 
+# ^^^^^^^^ note zsh not sh or bash
+#
+# This is needed to get HERE documents to work correctly
+# when lines in the document end with a backslash
+#
+# Zsh correctly does not join lines in a HERE document that end in a backslash
+# Bash incorrectly joins lines in a HERE document that end in a backslash
+
+##########################################################
+# Demo migration from MySQL to CockroachDB using MOLT tools
+###########################################################
+
 # Set options for better shell script behavior
 # Per https://gist.github.com/mohanpedala/1e2ff5661761d3abd0385e8223e16425
 #
@@ -18,13 +30,15 @@ set -euo pipefail
 # Uncomment to turn on shell tracing
 # set -x
 
-# Vaariable definitions
+# Variable definitions
 # NOTE: You must expoert Variables that will be displayed expanded in displayed commands
 
 # Docker container versions (can specify "latest" too)
 export MYSQL_VERSION='8.4.6'
 export COCKROACHDB_VERSION='v25.2.8'
 export HAPROXY_VERSION='1.7'
+export MOLT_VERSION='1.3.5'
+export REPLICATOR_VERSION='latest'
 
 MYSQL_ROOT_PASSWORD='root_root_root'
 export MYSQL_STARTUP_SLEEP=20
@@ -37,6 +51,8 @@ export CDC_CURSOR=''
 TEXT_WIDTH="100"
 STAGE=1
 TOTALSTAGES="9"
+BOLD=$(tput bold)
+NOBOLD=$(tput sgr0)
 
 if [[ "${1:-}" == "--nopause" ]]; then
   NOPAUSE=1
@@ -75,8 +91,7 @@ print_cmd() {
   trailing_space_removed=${param%[[:space:]]}
   leading_and_trailing_space_removed=${trailing_space_removed##[[:space:]]}
   echo
-  echo "$leading_and_trailing_space_removed" | envsubst $2
-#STH#  echo "$1" | envsubst $2
+  echo "${BOLD}${leading_and_trailing_space_removed}${NOBOLD}" | envsubst $2
   echo
 }
 
@@ -89,14 +104,15 @@ print_title() {
 # Parameters:
 # 1: The stage title or empty string
 # 2: Text to describe the current step or empty string
-# 3: Command to display and execute
+# 3: Command to display and execute or empty string
 #    The command may have leading or trailing blank lines
 #    (where a blank line is either an empty line or a line of only whitespace)
 #    The command may be multi-line, using backslash at the end of line as a continuation character
-#    The command may have variable references in it
-# 4: List of variables to be substituted, or the word "noexpand"
+#    The command may have environment variable references in it
+#    Note: Variable references, if any, should be environment variables not local shell variables
+# 4: List of environment variables to be substituted, or the word "noexpand"
 #    The list is in the form $VAR1:$VAR2:$VAR3 including dollar signs (so enclose in single quotes).
-#    Any variables not listed will not be expanded in the displayed command
+#    Any environment variables not listed will not be expanded in the displayed command
 # 5: [OPTIONAL] Whether to pause after displaying the command and before running it.
 #    To not pause at all, specify "nopause"
 #    To just pause after execution, specify "pause_after"
@@ -149,7 +165,6 @@ docker run \
  --net=us-west2-net \
  -e MYSQL_ROOT_PASSWORD=$MYSQL_ROOT_PASSWORD \
  -p 3306:3306 \
- -v ./mysql_files:/mysql_files:ro \
  mysql:$MYSQL_VERSION
 EOFHERE
 )
@@ -565,7 +580,7 @@ echo
 ls -l certs_cockroachdb_ca my_safe_directory_cockroachdb
 EOFHERE
 )
-do_stage '' "$TEXT" "$CMD" noexpand
+do_stage '' "$TEXT" "$CMD" '$COCKROACHDB_VERSION'
 
 TEXT='Next step: Generate Cockroachdb node 1 certificate and private key'
 CMD=$(cat <<'EOFHERE'
@@ -866,7 +881,7 @@ docker run \
  --ip=172.27.0.102 \
  --net=us-west2-net \
  -v ./certs_cockroachdb_clients:/app/certs \
- cockroachdb/molt \
+ cockroachdb/molt:$MOLT_VERSION \
   fetch \
    --logging debug \
    --mode data-load \
@@ -877,7 +892,7 @@ docker run \
 | tee molt_fetch_output.txt
 EOFHERE
 )
-do_stage '' "$TEXT" "$CMD" noexpand
+do_stage '' "$TEXT" "$CMD" '$MOLT_VERSION'
 #TODO specify MOLT version
 
 TEXT='Get the CDC Cursor for later use with MOLT Replicator so we can start streaming changes from the right point.'
@@ -914,7 +929,7 @@ docker run \
  --ip=172.27.0.103 \
  --net=us-west2-net \
  -v ./certs_cockroachdb_clients:/app/certs \
- cockroachdb/molt \
+ cockroachdb/molt:$MOLT_VERSION \
   verify \
    --table-filter '[^_].*' \
    --allow-tls-mode-disable \
@@ -923,7 +938,7 @@ docker run \
 | tee molt_verify_output.txt
 EOFHERE
 )
-do_stage '' "$TEXT" "$CMD" noexpand
+do_stage '' "$TEXT" "$CMD" '$MOLT_VERSION'
 
 TEXT='Pretty-print MOLT Verify output'
 CMD=$(cat <<'EOFHERE'
@@ -995,10 +1010,15 @@ Note: You could do this either before or after starting streaming replication.
   will have to happen concurrently with data changes that are being
   replicated from the source system.'
 CMD=$(cat <<'EOFHERE'
-echo 'TBD'
+docker exec roach-seattle-1 \
+ ./cockroach \
+  --host=roach-seattle-1:26257 \
+  sql \
+  --certs-dir=certs \
+  --file /CockroachDB_files/Chinook_CockroachDB_from_MySql_NO_DATA_JUST_CONSTRAINTS_AND_INDEXES.sql
 EOFHERE
 )
-do_stage '' "$TEXT" "$CMD" noexpand pause_after
+do_stage '' "$TEXT" "$CMD" noexpand
 
 TITLE='Streaming replication using MOLT Replicator'
 TEXT='Set up streaming replication'
@@ -1010,7 +1030,7 @@ docker run \
  --ip=172.27.0.104 \
  --net=us-west2-net \
  -v ./certs_cockroachdb_clients:/certs \
- cockroachdb/replicator \
+ cockroachdb/replicator:$REPLICATOR_VERSION \
   mylogical \
    -vv \
    --defaultGTIDSet $CDC_CURSOR \
@@ -1023,7 +1043,7 @@ docker run \
 sleep 3
 EOFHERE
 )
-do_stage "$TITLE" "$TEXT" "$CMD" '$CDC_CURSOR'
+do_stage "$TITLE" "$TEXT" "$CMD" '$CDC_CURSOR:$REPLICATOR_VERSION'
 
 TEXT='View MOLT Replicator log output'
 CMD=$(cat <<'EOFHERE'
@@ -1094,7 +1114,7 @@ docker run \
  --ip=172.27.0.103 \
  --net=us-west2-net \
  -v ./certs_cockroachdb_clients:/app/certs \
- cockroachdb/molt \
+ cockroachdb/molt:$MOLT_VERSION \
   verify \
    --table-filter 'Artist' \
    --allow-tls-mode-disable \
@@ -1103,7 +1123,7 @@ docker run \
 | tail -n +2 | jq
 EOFHERE
 )
-do_stage '' "$TEXT" "$CMD" noexpand
+do_stage '' "$TEXT" "$CMD" '$MOLT_VERSION'
 
 TEXT='Again view MOLT Replicator log output'
 CMD=$(cat <<'EOFHERE'
@@ -1221,7 +1241,7 @@ docker run \
  -p 30004:30004 \
  -v ./certs_cockroachdb_clients:/certs_crdb \
  -v ./certs_replicator_reverse:/certs_replicator_reverse \
- cockroachdb/replicator \
+ cockroachdb/replicator:$REPLICATOR_VERSION \
   start \
    -v \
    --stagingSchema _replicator \
@@ -1234,7 +1254,7 @@ docker run \
    --tlsPrivateKey /certs_replicator_reverse/node.key
 EOFHERE
 )
-do_stage '' "$TEXT" "$CMD" noexpand
+do_stage '' "$TEXT" "$CMD" '$REPLICATOR_VERSION'
 
 TEXT='Look at MOLT Replicator logs'
 CMD=$(cat <<'EOFHERE'
